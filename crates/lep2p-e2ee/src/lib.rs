@@ -29,9 +29,11 @@
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use lep2p_identity::{Identity, NodeId};
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use zeroize::Zeroize;
 
@@ -108,6 +110,94 @@ pub fn context_aad(sender: &NodeId, receiver: &NodeId) -> Vec<u8> {
     aad.extend_from_slice(sender.as_bytes());
     aad.extend_from_slice(receiver.as_bytes());
     aad
+}
+
+/// Domain separation for the identity -> X25519 key binding signature.
+const KEY_BUNDLE_DOMAIN: &[u8] = b"lep2p-keybundle-v1";
+
+/// A signed binding between a node's ed25519 identity and its X25519 key.
+///
+/// Bundles are self-verifying: anyone can check that the claimed `NodeId`
+/// (SHA-256 of the ed25519 key) matches and that the signature covers the
+/// X25519 key. Peers can therefore publish bundles through untrusted
+/// intermediaries without those intermediaries being able to substitute
+/// them — a substitution fails verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyBundle {
+    /// ed25519 public key (32 bytes).
+    pub ed25519_pub: Vec<u8>,
+    /// X25519 public key in Montgomery form (32 bytes).
+    pub x25519_pub: Vec<u8>,
+    /// ed25519 signature over `KEY_BUNDLE_DOMAIN || x25519_pub || ed25519_pub`.
+    pub sig: Vec<u8>,
+}
+
+impl KeyBundle {
+    /// Build the bundle for `identity`.
+    pub fn create(identity: &Identity) -> Self {
+        let ed = identity.verifying_key();
+        let x = public_key(identity);
+        let sig = identity
+            .signing_key()
+            .sign(&Self::signing_message(&x, ed.as_bytes()));
+        Self {
+            ed25519_pub: ed.as_bytes().to_vec(),
+            x25519_pub: x.to_vec(),
+            sig: sig.to_bytes().to_vec(),
+        }
+    }
+
+    fn signing_message(x25519_pub: &[u8; 32], ed25519_pub: &[u8; 32]) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(KEY_BUNDLE_DOMAIN.len() + 64);
+        msg.extend_from_slice(KEY_BUNDLE_DOMAIN);
+        msg.extend_from_slice(x25519_pub);
+        msg.extend_from_slice(ed25519_pub);
+        msg
+    }
+
+    /// The `NodeId` this bundle belongs to, if the ed25519 key is well-formed.
+    pub fn node_id(&self) -> Option<NodeId> {
+        let ed: [u8; 32] = self.ed25519_pub.as_slice().try_into().ok()?;
+        Some(NodeId(Sha256::digest(ed).into()))
+    }
+
+    /// The X25519 public key, if well-formed.
+    pub fn x25519(&self) -> Option<[u8; 32]> {
+        self.x25519_pub.as_slice().try_into().ok()
+    }
+
+    /// Verify key lengths, the `NodeId` binding, and the signature.
+    pub fn verify(&self, expected: &NodeId) -> bool {
+        let (Ok(ed_bytes), Ok(x_bytes)) = (
+            <[u8; 32]>::try_from(self.ed25519_pub.as_slice()),
+            <[u8; 32]>::try_from(self.x25519_pub.as_slice()),
+        ) else {
+            return false;
+        };
+        if NodeId(Sha256::digest(ed_bytes).into()) != *expected {
+            return false;
+        }
+        let Ok(verifying) = VerifyingKey::from_bytes(&ed_bytes) else {
+            return false;
+        };
+        let Ok(sig_bytes) = <[u8; 64]>::try_from(self.sig.as_slice()) else {
+            return false;
+        };
+        let sig = Signature::from_bytes(&sig_bytes);
+        verifying
+            .verify(&Self::signing_message(&x_bytes, &ed_bytes), &sig)
+            .is_ok()
+    }
+
+    /// Verify self-consistency and derive the shared key between the bundle's
+    /// owner and `identity` (the local node).
+    pub fn shared_key_with(&self, identity: &Identity) -> Option<[u8; 32]> {
+        let node_id = self.node_id()?;
+        if !self.verify(&node_id) {
+            return None;
+        }
+        Some(shared_key(identity, &self.x25519()?))
+    }
 }
 
 /// Seal `plaintext` under `key` with `aad`, returning `nonce || ciphertext`.
@@ -217,5 +307,35 @@ mod tests {
     fn truncated_payload_is_malformed() {
         let key = [7u8; 32];
         assert!(matches!(open(&key, b"", &[0u8; 20]), Err(E2eeError::Malformed)));
+    }
+
+    #[test]
+    fn key_bundle_verifies_and_derives_matching_keys() {
+        let (a, b, _) = identities();
+        let a_bundle = KeyBundle::create(&a);
+        let b_bundle = KeyBundle::create(&b);
+
+        assert!(a_bundle.verify(&a.node_id()));
+        assert!(b_bundle.verify(&b.node_id()));
+
+        let ab_a = a_bundle.shared_key_with(&b).unwrap();
+        let ab_b = b_bundle.shared_key_with(&a).unwrap();
+        assert_eq!(ab_a, ab_b);
+        assert_eq!(ab_a, shared_key(&a, &b_bundle.x25519().unwrap()));
+    }
+
+    #[test]
+    fn key_bundle_rejects_tampered_x25519() {
+        let (a, _, _) = identities();
+        let mut bundle = KeyBundle::create(&a);
+        bundle.x25519_pub[0] ^= 0x01;
+        assert!(!bundle.verify(&a.node_id()));
+    }
+
+    #[test]
+    fn key_bundle_rejects_wrong_node_id() {
+        let (a, b, _) = identities();
+        let bundle = KeyBundle::create(&a);
+        assert!(!bundle.verify(&b.node_id()));
     }
 }

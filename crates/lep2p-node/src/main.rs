@@ -9,9 +9,11 @@ use config::Config;
 use lep2p_core::{Capabilities, PingReq, PingResp, SCHEMA_VERSION};
 use lep2p_dht::{DhtNode, FindNodeEndpoint, GetEndpoint, PutEndpoint};
 use lep2p_identity::Identity;
-use lep2p_nat::{NoRelay, PunchEndpoint, ReflectEndpoint, RelayEndpoint};
-use lep2p_transport::{CallCtx, Endpoint, EndpointResult, NodeTransport, Peer, PeerTable, Router};
-use serde::Deserialize;
+use lep2p_nat::{
+    HelloEndpoint, NodeKeysEndpoint, NoRelay, PunchEndpoint, ReflectEndpoint, RelayBlobEndpoint,
+    RelayEndpoint, RelayPullEndpoint, RelayQueues,
+};
+use lep2p_transport::{CallCtx, Endpoint, EndpointResult, NodeTransport, PeerTable, Router};
 use serde_json::json;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -128,10 +130,20 @@ async fn run(identity: Identity, cfg: Config) -> anyhow::Result<()> {
     let store: Arc<RwLock<HashMap<String, (String, u64)>>> = dht.store.clone();
 
     // Wire the control endpoints.
+    let relay_queues = RelayQueues::default();
     let router = Arc::new(Router::default());
     router.register("/v1/ping", PingEndpoint);
     router.register("/v1/node/info", InfoEndpoint);
-    router.register("/v1/hello", HelloEndpoint { peers: peers.clone() });
+    router.register("/v1/hello", HelloEndpoint::new(peers.clone()));
+    router.register("/v1/node/keys", NodeKeysEndpoint::new(peers.clone()));
+    router.register(
+        "/v1/relay/blob",
+        RelayBlobEndpoint::new(peers.clone(), relay_queues.clone()),
+    );
+    router.register(
+        "/v1/relay/pull",
+        RelayPullEndpoint::new(relay_queues.clone()),
+    );
     router.register("/v1/nat/reflect", ReflectEndpoint);
     router.register(
         "/v1/nat/punch",
@@ -153,6 +165,40 @@ async fn run(identity: Identity, cfg: Config) -> anyhow::Result<()> {
     tracing::info!("bootstrapped with {} seed peer(s)", boot.len());
     for p in &boot {
         tracing::debug!("seed peer: {} @ {}", p.node_id.short(), p.observed);
+    }
+
+    // Application side of the sealed-blob mailbox: drain blobs addressed to
+    // this node and open them end-to-end.
+    {
+        let identity = transport.identity();
+        let queues = relay_queues.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                for blob in queues.drain(&identity.node_id()) {
+                    let from_id = lep2p_core::parse_node_id(&blob.from);
+                    let opened = from_id.and_then(|from_id| {
+                        if !blob.from_bundle.verify(&from_id) {
+                            return None;
+                        }
+                        let key = blob.from_bundle.shared_key_with(&identity)?;
+                        let aad = lep2p_e2ee::context_aad(&from_id, &identity.node_id());
+                        lep2p_e2ee::open(&key, &aad, &blob.blob).ok()
+                    });
+                    match (from_id, opened) {
+                        (_, Some(plain)) => tracing::info!(
+                            "sealed message from {}: {}",
+                            from_id.map(|n| n.short()).unwrap_or_default(),
+                            String::from_utf8_lossy(&plain)
+                        ),
+                        (Some(from_id), None) => {
+                            tracing::warn!("could not open relayed blob from {}", from_id.short())
+                        }
+                        (None, _) => tracing::warn!("bad sender id in relayed blob"),
+                    }
+                }
+            }
+        });
     }
 
     // Serve control plane forever.
@@ -183,36 +229,6 @@ impl Endpoint for InfoEndpoint {
     async fn call(&self, ctx: &CallCtx, _body: serde_json::Value) -> EndpointResult {
         use lep2p_transport::router::ok;
         ok(json!({ "v": SCHEMA_VERSION, "node": ctx.node_info() }))
-    }
-}
-
-/// Register this connection's node id -> observed address so the node can act
-/// as rendezvous (for punching) and be found via DHT find_node.
-struct HelloEndpoint {
-    peers: Arc<PeerTable>,
-}
-#[async_trait::async_trait]
-impl Endpoint for HelloEndpoint {
-    async fn call(&self, ctx: &CallCtx, body: serde_json::Value) -> EndpointResult {
-        #[derive(Deserialize)]
-        #[allow(dead_code)]
-        struct Req {
-            v: u32,
-            node_id: String,
-        }
-        let req: Req = serde_json::from_value(body)
-            .map_err(|e| lep2p_transport::ControlError::BadRequest(e.to_string()))?;
-        let node_id = lep2p_core::parse_node_id(&req.node_id)
-            .ok_or_else(|| lep2p_transport::ControlError::BadRequest("bad node_id".into()))?;
-        if let Some(conn) = &ctx.conn {
-            self.peers.insert(Peer::new(
-                conn.clone(),
-                node_id,
-                ctx.observed,
-            ));
-        }
-        use lep2p_transport::router::ok;
-        ok(json!({ "v": SCHEMA_VERSION, "ok": true }))
     }
 }
 

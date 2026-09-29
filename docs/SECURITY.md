@@ -2,11 +2,14 @@
 
 ## What is protected today
 
-- **Per-hop transport**: every QUIC connection uses TLS 1.3. Each node's
-  self-signed root certificate *is* its identity, and the peer verifies the
-  certificate chain against the expected `NodeId` (`SHA-256(ed25519 pubkey)`).
-  On-path observers cannot read or modify traffic, and a peer cannot
-  impersonate another node.
+- **Per-hop transport**: every QUIC connection uses TLS 1.3 with **mutual**
+  authentication. Each node's self-signed root certificate *is* its identity,
+  the connecting side pins the expected `NodeId` (`SHA-256(ed25519 pubkey)`),
+  and the accepting side requests and records the client certificate. On-path
+  observers cannot read or modify traffic, and neither side can impersonate
+  another node. The authenticated client identity is exposed to endpoint
+  handlers as `CallCtx::peer_node_id`; `/v1/hello` rejects any `node_id` that
+  does not match the TLS certificate.
 - **Wire obfuscation**: QUIC datagrams are XOR-whitened with a keyed keystream
   derived from the receiving node's identity (`lep2p-obfs`), hiding QUIC/TLS
   signatures from DPI.
@@ -40,9 +43,16 @@ the workspace provides `lep2p-e2ee`:
   side's public key; both compute the same secret.
 - **Key schedule**: X25519 output goes through HKDF-SHA256 with a fixed salt
   (`lep2p-e2ee-v1-kdf`) and info (`lep2p-e2ee-v1-session`).
+- **Key distribution**: `KeyBundle` is a self-verifying, signed binding between
+  a node's ed25519 identity and its X25519 key. Bundles can be published
+  through untrusted intermediaries (`/v1/hello`, `/v1/node/keys`) because a
+  substituted bundle fails signature and `NodeId` checks.
 - **AEAD**: payloads are sealed with ChaCha20-Poly1305 as
   `nonce (12 B) || ciphertext`. The associated data binds the message to the
   sender and receiver (`context_aad`), preventing cross-session replay.
+- **Sealed-blob relay**: `/v1/relay/blob` queues a sealed blob in the target's
+  mailbox on any node; the target drains it with `/v1/relay/pull`. The relay
+  forwards opaque bytes and cannot read or meaningfully modify them.
 
 Security properties: confidentiality and integrity against any node that is
 not one of the two endpoints, including relays. Key compromise of one identity
@@ -52,7 +62,8 @@ does not expose other pairs (per-pair keys).
 
 - Ephemeral X25519 (per-session) + key ratchet for forward secrecy in the M2
   data plane.
-- Seal relayed control messages (DHT `put/get`, relay offers) with
-  `lep2p-e2ee` so rendezvous nodes see only opaque blobs.
+- Seal DHT `put/get` and relay offers with `lep2p-e2ee` so intermediate nodes
+  see only opaque blobs (the relay mailbox already does this).
+- Mailbox quotas, expiration, and rate limiting to bound relay storage.
 - Signed DHT records to prevent poisoning by intermediate nodes.
 - Rate limiting and connection limits to mitigate DoS.

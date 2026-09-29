@@ -81,9 +81,12 @@ All endpoints are HTTP/3 JSON under `/v1/`; every message carries a `v`
 |---|---|
 | `POST /v1/ping` | Hello + capabilities |
 | `POST /v1/node/info` | NodeInfo (incl. observed address) |
-| `POST /v1/hello` | Register node_id -> observed address (rendezvous) |
+| `POST /v1/hello` | Register node_id -> observed address + E2EE key bundle |
+| `POST /v1/node/keys` | Verified E2EE key bundle of a known peer |
 | `POST /v1/nat/reflect` | Caller's observed external `ip:port` |
 | `POST /v1/nat/punch` | Hole punch toward a target via this rendezvous |
+| `POST /v1/relay/blob` | Queue a sealed (E2EE) blob for another node |
+| `POST /v1/relay/pull` | Drain sealed blobs addressed to the caller |
 | `POST /v1/relay/offer` | Relay address (stub; relay off by default) |
 | `POST /v1/dht/find_node` | Kademlia FIND_NODE |
 | `POST /v1/dht/put` | DHT PUT |

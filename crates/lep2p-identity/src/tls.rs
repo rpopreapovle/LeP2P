@@ -166,23 +166,32 @@ impl ClientCertVerifier for NodeIdVerifier {
     }
 }
 
-/// Server rustls config with our self-signed cert. Identity of the server is
-/// carried in the certificate (ed25519 key); clients verify it via `client_config`.
+/// Server rustls config with our self-signed cert and **mutual** auth: the
+/// server requests a client certificate and accepts any well-formed node cert
+/// (`verify_any` mode). Identity of the server is carried in the certificate
+/// (ed25519 key); clients verify it via `client_config`.
 pub fn server_config(tls: &ServerTls) -> Result<rustls::ServerConfig, rustls::Error> {
     rustls::ServerConfig::builder()
-        .with_no_client_auth()
+        .with_client_cert_verifier(Arc::new(NodeIdVerifier {
+            expected: NodeId([0u8; 32]),
+            allow_any: true,
+        }))
         .with_single_cert(vec![tls.cert.clone()], tls.key.clone_key())
 }
 
-/// Client rustls config authenticating a specific peer by NodeId (address == identity).
-pub fn client_config(expected: NodeId) -> rustls::ClientConfig {
+/// Client rustls config authenticating a specific peer by NodeId
+/// (address == identity) and presenting our own certificate to the server.
+pub fn client_config(
+    expected: NodeId,
+    own: &ServerTls,
+) -> Result<rustls::ClientConfig, rustls::Error> {
     rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NodeIdVerifier {
             expected,
             allow_any: false,
         }))
-        .with_no_client_auth()
+        .with_client_auth_cert(vec![own.cert.clone()], own.key.clone_key())
 }
 
 fn sha256(data: &[u8]) -> [u8; 32] {

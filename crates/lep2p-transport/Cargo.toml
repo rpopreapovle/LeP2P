@@ -8,6 +8,8 @@ license.workspace = true
 lep2p-identity.workspace = true
 lep2p-core.workspace = true
 lep2p-obfs.workspace = true
+lep2p-e2ee.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio.workspace = true
 anyhow.workspace = true
 serde.workspace = true

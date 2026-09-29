@@ -82,6 +82,8 @@ lep2p/                        # facade crate: client + server API for embedding
 All under `/v1/`. Request/response bodies JSON with `v` field.
 - `POST /v1/ping` → hello + `capabilities`.
 - `POST /v1/node/info` → `NodeInfo` (incl. observed addr).
+- `POST /v1/hello` → register `node_id` → observed addr + signed E2EE key bundle.
+- `POST /v1/node/keys` → verified E2EE key bundle of a known peer.
 - `POST /v1/connect` → establish full logical channel (E2EE context), returns capabilities.
 - `POST /v1/nat/reflect` → return caller's observed external `ip:port` (seen on the incoming datagram/QUIC connection).
 - `POST /v1/nat/punch` `{ target }` → target relays punch request to `target`; returns target's observed endpoint + punch intent.
@@ -90,6 +92,8 @@ All under `/v1/`. Request/response bodies JSON with `v` field.
 - `POST /v1/dht/put` `{ key, value, ttl }`.
 - `POST /v1/dht/get` `{ key }` → `{ value, nodes }`.
 - `POST /v1/relay/offer` `{ target }` → relay address (stub; relay off by default).
+- `POST /v1/relay/blob` `{ to, from_bundle, blob }` → queue a sealed blob for another node.
+- `POST /v1/relay/pull` → drain sealed blobs addressed to the authenticated caller.
 
 Capability advertisement: `ping`/`connect` respond with `capabilities` so the caller can pick a route (`nat.methods`).
 

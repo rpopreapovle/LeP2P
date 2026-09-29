@@ -10,6 +10,7 @@ pub mod router;
 use lep2p_core::{
     Capabilities, NodeInfo, SCHEMA_VERSION, ALPN_CONTROL,
 };
+use lep2p_e2ee::KeyBundle;
 use lep2p_identity::{tls, Identity, NodeId};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -30,6 +31,10 @@ pub struct CallCtx {
     /// The control connection this call arrived on (server side); lets a peer
     /// register itself in the peer table so it can act as rendezvous/target.
     pub conn: Option<quinn::Connection>,
+    /// Authenticated identity of the caller, extracted from its TLS client
+    /// certificate during the handshake. Unlike self-reported ids in request
+    /// bodies, this value cannot be spoofed.
+    pub peer_node_id: Option<NodeId>,
 }
 
 impl CallCtx {
@@ -56,6 +61,8 @@ pub struct Peer {
     pub conn: quinn::Connection,
     pub node_id: NodeId,
     pub observed: SocketAddr,
+    /// Verified E2EE key bundle published by this peer (if it announced one).
+    key_bundle: Arc<std::sync::RwLock<Option<KeyBundle>>>,
     h3: Arc<tokio::sync::Mutex<Option<H3Client>>>,
 }
 
@@ -65,8 +72,19 @@ impl Peer {
             conn,
             node_id,
             observed,
+            key_bundle: Arc::new(std::sync::RwLock::new(None)),
             h3: Arc::new(tokio::sync::Mutex::new(None)),
         }
+    }
+
+    /// The peer's verified E2EE key bundle, if it published one.
+    pub fn key_bundle(&self) -> Option<KeyBundle> {
+        self.key_bundle.read().unwrap().clone()
+    }
+
+    /// Attach a verified key bundle for this peer.
+    pub fn set_key_bundle(&self, bundle: KeyBundle) {
+        *self.key_bundle.write().unwrap() = Some(bundle);
     }
 
     /// Send one HTTP/3 JSON control request and await the JSON response.
@@ -264,7 +282,8 @@ impl NodeTransport {
         addr: SocketAddr,
         expected_peer: NodeId,
     ) -> anyhow::Result<Peer> {
-        let mut cctls = tls::client_config(expected_peer);
+        let own_tls = tls::build_server_tls(&self.identity)?;
+        let mut cctls = tls::client_config(expected_peer, &own_tls)?;
         cctls.alpn_protocols = vec![ALPN_CONTROL.to_vec()];
         let cc = quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(cctls)?,
@@ -311,6 +330,7 @@ impl NodeTransport {
         router: Arc<Router>,
     ) -> anyhow::Result<()> {
             let observed = conn.remote_address();
+            let peer_node_id = peer_cert_node_id(&conn);
             let mut server = h3::server::Connection::new(h3_quinn::Connection::new(conn.clone())).await?;
         loop {
             let req = match server.accept().await? {
@@ -325,6 +345,7 @@ impl NodeTransport {
                 identity: self.identity.clone(),
                 capabilities: self.capability.clone(),
                 conn: Some(conn.clone()),
+                peer_node_id,
             };
             tokio::spawn(async move {
                 let path = request.uri().path().to_string();
@@ -371,4 +392,14 @@ impl NodeTransport {
         }
         Ok(())
     }
+}
+
+/// Extract the authenticated peer `NodeId` from the TLS client certificate
+/// presented during the handshake (mutual TLS).
+fn peer_cert_node_id(conn: &quinn::Connection) -> Option<NodeId> {
+    let certs = conn
+        .peer_identity()?
+        .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+        .ok()?;
+    tls::cert_node_id(certs.first()?)
 }
