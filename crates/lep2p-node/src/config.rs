@@ -16,6 +16,33 @@ pub struct Config {
     pub keyfile: Option<String>,
     /// Whether relay/TURN proxying is enabled (M2; default off).
     pub relay: RelayConfig,
+    /// TUN overlay settings (M2).
+    pub overlay: OverlayConfig,
+}
+
+/// TUN overlay configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct OverlayConfig {
+    /// Create and serve a TUN device.
+    pub enabled: bool,
+    /// Interface name.
+    pub name: String,
+    /// Interface MTU.
+    pub mtu: u16,
+    /// Peers to attach at startup, each `"<node_id_base32>@<ip:port>"`.
+    pub peers: Vec<String>,
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            name: "lep2p0".into(),
+            mtu: 1420,
+            peers: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -33,6 +60,7 @@ impl Default for Config {
             seeds: vec![],
             keyfile: None,
             relay: RelayConfig::default(),
+            overlay: OverlayConfig::default(),
         }
     }
 }

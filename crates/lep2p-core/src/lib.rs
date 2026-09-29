@@ -4,7 +4,7 @@
 
 use lep2p_identity::NodeId;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 
 /// Current wire/schema version. Bumped on breaking protocol changes.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -13,6 +13,16 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const ALPN_CONTROL: &[u8] = b"h3";
 /// Data-plane ALPN used for raw bidi tunnelling streams.
 pub const ALPN_OVERLAY: &[u8] = b"lep2p-overlay";
+
+/// Overlay IPv6 address derived from a `NodeId` (`fd00::/16` + 14 hash bytes),
+/// so `address == identity`.
+pub fn overlay_for(node_id: &NodeId) -> Ipv6Addr {
+    let mut octets = [0u8; 16];
+    octets[0] = 0xfd;
+    octets[1] = 0x00;
+    octets[2..].copy_from_slice(&node_id.as_bytes()[..14]);
+    Ipv6Addr::from(octets)
+}
 
 // ---------------------------------------------------------------------------
 // Capabilities

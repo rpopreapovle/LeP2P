@@ -351,11 +351,7 @@ fn kad_node_to_info(id: NodeId, addr: SocketAddr) -> NodeInfo {
 
 /// Reconstruct the overlay IPv6 for a NodeId (fd00::/16 + 14 bytes of hash).
 pub fn overlay_for(id: NodeId) -> Ipv6Addr {
-    let mut octets = [0u8; 16];
-    octets[0] = 0xfd;
-    octets[1] = 0x00;
-    octets[2..].copy_from_slice(&id.0[..14]);
-    octets.into()
+    lep2p_core::overlay_for(&id)
 }
 
 fn now_ts() -> u64 {

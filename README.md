@@ -39,7 +39,7 @@ crates/
   lep2p-dht/                  # Kademlia + TXT DNS seeds
   lep2p-obfs/                 # wire obfuscation of QUIC datagrams
   lep2p-e2ee/                 # application-layer end-to-end encryption
-  lep2p-overlay/              # TUN + OS routing (milestone 2)
+  lep2p-overlay/              # TUN overlay over the data plane (milestone 2)
   lep2p-node/                 # server binary + CLI + TOML config
 docs/ARCHITECTURE.md          # design notes and milestone spec
 docs/SECURITY.md              # threat model and E2EE design
@@ -73,6 +73,12 @@ listen = "0.0.0.0:12345"
 keyfile = "node.key"
 seeds = ["_lep2p.example.org"]
 relay = { enabled = false, methods = [] }
+
+[overlay]
+enabled = false            # requires root/CAP_NET_ADMIN and `modprobe tun`
+name = "lep2p0"
+mtu = 1420
+peers = ["<node_id_base32>@<ip:port>"]
 ```
 
 ## Control plane

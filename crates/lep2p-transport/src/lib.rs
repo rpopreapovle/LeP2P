@@ -474,13 +474,13 @@ impl DataConn {
     /// Open a new bidirectional data stream to the peer.
     pub async fn open_stream(&self) -> anyhow::Result<DataStream> {
         let (send, recv) = self.conn.open_bi().await?;
-        Ok(DataStream { send, recv })
+        Ok(DataStream::from_quinn(send, recv))
     }
 
     /// Accept a bidirectional data stream opened by the peer.
     pub async fn accept_stream(&self) -> anyhow::Result<DataStream> {
         let (send, recv) = self.conn.accept_bi().await?;
-        Ok(DataStream { send, recv })
+        Ok(DataStream::from_quinn(send, recv))
     }
 
     /// Close the data connection with a reason.
@@ -492,11 +492,45 @@ impl DataConn {
 
 /// One bidirectional stream of length-prefixed packets.
 pub struct DataStream {
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
+    send: DataStreamSend,
+    recv: DataStreamRecv,
 }
 
 impl DataStream {
+    fn from_quinn(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
+        Self {
+            send: DataStreamSend { send },
+            recv: DataStreamRecv { recv },
+        }
+    }
+
+    /// Split into independent send and receive halves (for reader/writer tasks).
+    pub fn split(self) -> (DataStreamSend, DataStreamRecv) {
+        (self.send, self.recv)
+    }
+
+    /// Send one framed packet: `len (u32 BE) || bytes`.
+    pub async fn send_packet(&mut self, packet: &[u8]) -> anyhow::Result<()> {
+        self.send.send_packet(packet).await
+    }
+
+    /// Receive one framed packet; `Ok(None)` on a clean end of stream.
+    pub async fn recv_packet(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
+        self.recv.recv_packet().await
+    }
+
+    /// Finish the sending side; the peer observes a clean end of stream.
+    pub fn finish(&mut self) -> anyhow::Result<()> {
+        self.send.finish()
+    }
+}
+
+/// Sending half of a [`DataStream`].
+pub struct DataStreamSend {
+    send: quinn::SendStream,
+}
+
+impl DataStreamSend {
     /// Send one framed packet: `len (u32 BE) || bytes`.
     pub async fn send_packet(&mut self, packet: &[u8]) -> anyhow::Result<()> {
         if packet.len() > MAX_PACKET_LEN {
@@ -509,6 +543,19 @@ impl DataStream {
         Ok(())
     }
 
+    /// Finish the sending side; the peer observes a clean end of stream.
+    pub fn finish(&mut self) -> anyhow::Result<()> {
+        self.send.finish()?;
+        Ok(())
+    }
+}
+
+/// Receiving half of a [`DataStream`].
+pub struct DataStreamRecv {
+    recv: quinn::RecvStream,
+}
+
+impl DataStreamRecv {
     /// Receive one framed packet; `Ok(None)` on a clean end of stream.
     pub async fn recv_packet(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
         let mut len_buf = [0u8; 4];
@@ -524,12 +571,6 @@ impl DataStream {
         let mut packet = vec![0u8; len];
         self.recv.read_exact(&mut packet).await?;
         Ok(Some(packet))
-    }
-
-    /// Finish the sending side; the peer observes a clean end of stream.
-    pub fn finish(&mut self) -> anyhow::Result<()> {
-        self.send.finish()?;
-        Ok(())
     }
 }
 

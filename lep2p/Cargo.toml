@@ -28,3 +28,4 @@ sha2 = "0.10"
 async-trait = "0.1"
 tokio.workspace = true
 serde_json.workspace = true
+lep2p-overlay.workspace = true

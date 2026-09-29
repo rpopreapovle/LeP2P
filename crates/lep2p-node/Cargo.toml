@@ -15,6 +15,7 @@ lep2p-identity.workspace = true
 lep2p-nat.workspace = true
 lep2p-dht.workspace = true
 lep2p-e2ee.workspace = true
+lep2p-overlay.workspace = true
 tokio.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true

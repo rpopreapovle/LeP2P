@@ -2,3 +2,12 @@ listen = "0.0.0.0:12345"
 keyfile = "node.key"
 seeds = ["_lep2p.n1ko.dev"]
 relay = { enabled = false, methods = [] }
+
+# TUN overlay (milestone 2). Requires CAP_NET_ADMIN (run as root) and the
+# kernel `tun` module (`sudo modprobe tun`).
+[overlay]
+enabled = false
+name = "lep2p0"
+mtu = 1420
+# Peers to attach at startup: "<node_id_base32>@<ip:port>".
+peers = []

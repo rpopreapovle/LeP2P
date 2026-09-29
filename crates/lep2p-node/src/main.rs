@@ -13,7 +13,10 @@ use lep2p_nat::{
     HelloEndpoint, NodeKeysEndpoint, NoRelay, PunchEndpoint, ReflectEndpoint, RelayBlobEndpoint,
     RelayEndpoint, RelayPullEndpoint, RelayQueues,
 };
-use lep2p_transport::{CallCtx, Endpoint, EndpointResult, NodeTransport, PeerTable, Router};
+use lep2p_overlay::{LinuxTun, OverlayNode};
+use lep2p_transport::{
+    CallCtx, DataConn, DataHandler, Endpoint, EndpointResult, NodeTransport, PeerTable, Router,
+};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -166,6 +169,33 @@ async fn run(identity: Identity, cfg: Config) -> anyhow::Result<()> {
         tracing::debug!("seed peer: {} @ {}", p.node_id.short(), p.observed);
     }
 
+    // Overlay: a TUN device bridged to peer data streams. Requires
+    // CAP_NET_ADMIN (root) and the kernel `tun` module.
+    let overlay = if cfg.overlay.enabled {
+        let tun = LinuxTun::create(
+            &cfg.overlay.name,
+            lep2p_core::overlay_for(&node_id),
+            cfg.overlay.mtu,
+        )
+        .context("create TUN device (needs CAP_NET_ADMIN and `modprobe tun`)")?;
+        let node = OverlayNode::start(
+            transport.identity(),
+            Box::new(tun.reader()),
+            Arc::new(tun.writer()),
+        );
+        tracing::info!(
+            "overlay {} up with address {}",
+            tun.name(),
+            node.overlay_ipv6()
+        );
+        for spec in &cfg.overlay.peers {
+            spawn_peer_attach(transport.clone(), node.clone(), spec.clone());
+        }
+        Some(node)
+    } else {
+        None
+    };
+
     // Application side of the sealed-blob mailbox: drain blobs addressed to
     // this node and open them end-to-end.
     {
@@ -201,8 +231,66 @@ async fn run(identity: Identity, cfg: Config) -> anyhow::Result<()> {
         });
     }
 
-    // Serve control plane forever.
-    transport.clone().serve_control(router).await
+    // Serve control and (when enabled) data-plane connections.
+    let data_handler: Option<Arc<dyn DataHandler>> = overlay
+        .as_ref()
+        .map(|node| Arc::new(OverlayHandler { node: node.clone() }) as Arc<dyn DataHandler>);
+    transport.clone().serve_with(router, data_handler).await
+}
+
+/// Attach overlay peers in the background, retrying every 5 seconds.
+fn spawn_peer_attach(transport: Arc<NodeTransport>, node: Arc<OverlayNode>, spec: String) {
+    tokio::spawn(async move {
+        let Ok((peer_id, addr)) = parse_peer_spec(&spec) else {
+            tracing::warn!("bad overlay peer spec (want <node_id>@<ip:port>): {spec}");
+            return;
+        };
+        loop {
+            match transport.connect_data(addr, peer_id).await {
+                Ok(conn) => match node.add_peer(conn).await {
+                    Ok(peer) => {
+                        tracing::info!("overlay peer {} attached at {addr}", peer.short());
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!("overlay handshake with {} failed: {e}", peer_id.short())
+                    }
+                },
+                Err(e) => tracing::debug!("overlay connect to {addr} failed: {e}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+}
+
+fn parse_peer_spec(spec: &str) -> anyhow::Result<(lep2p_identity::NodeId, SocketAddr)> {
+    let (id, addr) = spec
+        .split_once('@')
+        .context("overlay peer must be <node_id_base32>@<ip:port>")?;
+    let node_id =
+        lep2p_core::parse_node_id(id.trim()).context("bad node_id in overlay peer spec")?;
+    let addr = addr
+        .trim()
+        .parse::<SocketAddr>()
+        .context("bad address in overlay peer spec")?;
+    Ok((node_id, addr))
+}
+
+/// Routes accepted data-plane connections into the overlay mesh.
+struct OverlayHandler {
+    node: Arc<OverlayNode>,
+}
+
+#[async_trait::async_trait]
+impl DataHandler for OverlayHandler {
+    async fn on_data(&self, conn: DataConn) {
+        let node = self.node.clone();
+        tokio::spawn(async move {
+            if let Err(e) = node.accept_peer(conn).await {
+                tracing::debug!("overlay accept failed: {e}");
+            }
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
