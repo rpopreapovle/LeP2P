@@ -26,6 +26,10 @@ impl LinuxTun {
         let device = tun::create_as_async(&config).map_err(to_io)?;
         let actual = device.tun_name().unwrap_or_else(|_| name.to_string());
 
+        // TUN devices inherit the host's IPv6 defaults; some hosts disable
+        // IPv6 by default, which would break the overlay addressing.
+        enable_ipv6(&actual)?;
+
         run_ip(&["link", "set", "dev", &actual, "mtu", &mtu.to_string()])?;
         run_ip(&[
             "-6",
@@ -94,6 +98,15 @@ impl TunWrite for LinuxTunWriter {
         }
         Ok(())
     }
+}
+
+/// Enable IPv6 on a freshly created interface (`disable_ipv6=0`).
+fn enable_ipv6(device: &str) -> io::Result<()> {
+    let path = format!("/proc/sys/net/ipv6/conf/{device}/disable_ipv6");
+    if std::path::Path::new(&path).exists() {
+        std::fs::write(&path, "0")?;
+    }
+    Ok(())
 }
 
 fn run_ip(args: &[&str]) -> io::Result<()> {
