@@ -17,10 +17,7 @@ struct AcceptInto {
 #[async_trait::async_trait]
 impl DataHandler for AcceptInto {
     async fn on_data(&self, conn: DataConn) {
-        let node = self.node.clone();
-        tokio::spawn(async move {
-            let _ = node.accept_peer(conn).await;
-        });
+        self.node.handle_data(conn);
     }
 }
 

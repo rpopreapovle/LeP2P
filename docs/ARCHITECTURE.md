@@ -129,7 +129,8 @@ Capability advertisement: `ping`/`connect` respond with `capabilities` so the ca
 ## M2 (in progress)
 - **M2.1 (done)**: data plane — raw QUIC bidi streams (ALPN `lep2p-overlay`) carrying length-prefixed packets. `NodeTransport::connect_data` / `serve_with` with ALPN dispatch on the single endpoint; `DataConn` / `DataStream`; peer identity from mutual TLS.
 - **M2.2 (done)**: `lep2p-overlay` — TUN device (`LinuxTun`) bridged to peer data streams with routing by overlay IPv6 address; peer handshake binds `node_id` to the derived address; `MemoryTun` enables root-free tests. Daemon `[overlay]` config (name/MTU/peers). OS routing handles the virtual network (transparent for games/crypto). HTTP/3 JSON remains control-only.
-- **M2.3 (next)**: relay data plane — indirect paths with end-to-end encryption between endpoints.
+- **M2.3 (done)**: relay data plane — `RelayFrame` control (request/incoming/established) over data streams; the relay blindly pipes sealed blobs between the two endpoints' streams; per-packet end-to-end encryption via authenticated sealed boxes (`add_relayed_peer`). Relay sees ciphertext only; nodes reachable behind NAT through a relay they connected to.
+- **M2.4 (next)**: OS routing automation (route installation for peer `/128`s), multi-hop relaying, receiver-side ratchet for full forward secrecy.
 - Relay proxy implementation for the relay trait.
 
 ## Conventions

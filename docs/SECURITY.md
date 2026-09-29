@@ -70,6 +70,12 @@ the workspace provides `lep2p-e2ee`:
   reader's `KeyBundle` (`DhtNode::put_sealed`); the storage node keeps only
   ciphertext. Readers fetch and open it with `DhtNode::get_sealed`. The
   publisher's bundle is checked against the TLS-authenticated sender.
+- **Relayed tunnels**: when a peer is only reachable through a relay, every
+  packet is sealed with `seal_authenticated` before leaving the sender and
+  opened only by the recipient, so the relay forwards opaque blobs. Sender
+  authenticity for relayed streams rests on the sealed-box static DH (only the
+  two endpoints can produce or consume valid blobs); the relay can refuse,
+  drop, or delay traffic but cannot read or alter it.
 - **Signed DHT records**: plaintext records can be signed by their publisher
   (`DhtNode::put_signed`); readers fetch them with `DhtNode::get_signed` and a
   required publisher, so a storage node cannot alter or swap values undetected.

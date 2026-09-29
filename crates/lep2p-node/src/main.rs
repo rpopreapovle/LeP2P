@@ -191,6 +191,14 @@ async fn run(identity: Identity, cfg: Config) -> anyhow::Result<()> {
         for spec in &cfg.overlay.peers {
             spawn_peer_attach(transport.clone(), node.clone(), spec.clone());
         }
+        if let Some(spec) = &cfg.overlay.relay {
+            spawn_relay_attach(
+                transport.clone(),
+                node.clone(),
+                spec.clone(),
+                cfg.overlay.relay_peers.clone(),
+            );
+        }
         Some(node)
     } else {
         None
@@ -284,13 +292,84 @@ struct OverlayHandler {
 #[async_trait::async_trait]
 impl DataHandler for OverlayHandler {
     async fn on_data(&self, conn: DataConn) {
-        let node = self.node.clone();
-        tokio::spawn(async move {
-            if let Err(e) = node.accept_peer(conn).await {
-                tracing::debug!("overlay accept failed: {e}");
-            }
-        });
+        self.node.handle_data(conn);
     }
+}
+
+/// Attach relayed tunnels through `relay_spec`, fetching peer key bundles
+/// from the relay's control plane and retrying until every peer is routed.
+fn spawn_relay_attach(
+    transport: Arc<NodeTransport>,
+    node: Arc<OverlayNode>,
+    relay_spec: String,
+    peer_specs: Vec<String>,
+) {
+    tokio::spawn(async move {
+        let Ok((relay_id, addr)) = parse_peer_spec(&relay_spec) else {
+            tracing::warn!("bad overlay relay spec (want <node_id>@<ip:port>): {relay_spec}");
+            return;
+        };
+        let peers: Vec<lep2p_identity::NodeId> = peer_specs
+            .iter()
+            .filter_map(|spec| lep2p_core::parse_node_id(spec.trim()))
+            .collect();
+        let client = lep2p_nat::NatClient {
+            transport: transport.clone(),
+        };
+        loop {
+            let all_routed = peers
+                .iter()
+                .all(|peer| node.has_route(&lep2p_core::overlay_for(peer)));
+            if all_routed {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                continue;
+            }
+
+            let data = match transport.connect_data(addr, relay_id).await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    tracing::debug!("relay data connect to {addr} failed: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+            node.handle_data(data.clone());
+
+            let control = match transport.connect(addr, relay_id).await {
+                Ok(peer) => peer,
+                Err(e) => {
+                    tracing::debug!("relay control connect to {addr} failed: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+
+            for peer in &peers {
+                if node.has_route(&lep2p_core::overlay_for(peer)) {
+                    continue;
+                }
+                match client.key_bundle(&control, *peer).await {
+                    Ok(Some(bundle)) => {
+                        match node.add_relayed_peer(data.clone(), *peer, bundle).await {
+                            Ok(()) => tracing::info!(
+                                "relayed peer {} attached via {}",
+                                peer.short(),
+                                relay_id.short()
+                            ),
+                            Err(e) => {
+                                tracing::warn!("relayed peer {} rejected: {e}", peer.short())
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::debug!("relay has no key bundle for {} yet", peer.short())
+                    }
+                    Err(e) => tracing::warn!("key lookup for {} failed: {e}", peer.short()),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

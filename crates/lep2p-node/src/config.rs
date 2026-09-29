@@ -30,8 +30,13 @@ pub struct OverlayConfig {
     pub name: String,
     /// Interface MTU.
     pub mtu: u16,
-    /// Peers to attach at startup, each `"<node_id_base32>@<ip:port>"`.
+    /// Peers to attach directly at startup, each `"<node_id_base32>@<ip:port>"`.
     pub peers: Vec<String>,
+    /// Relay node to tunnel through: `"<node_id_base32>@<ip:port>"`.
+    pub relay: Option<String>,
+    /// Peers to reach through the relay (node ids). Their key bundles are
+    /// fetched from the relay's control plane.
+    pub relay_peers: Vec<String>,
 }
 
 impl Default for OverlayConfig {
@@ -41,6 +46,8 @@ impl Default for OverlayConfig {
             name: "lep2p0".into(),
             mtu: 1420,
             peers: Vec::new(),
+            relay: None,
+            relay_peers: Vec::new(),
         }
     }
 }

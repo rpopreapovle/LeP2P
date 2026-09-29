@@ -9,5 +9,10 @@ relay = { enabled = false, methods = [] }
 enabled = false
 name = "lep2p0"
 mtu = 1420
-# Peers to attach at startup: "<node_id_base32>@<ip:port>".
+# Peers to attach directly at startup: "<node_id_base32>@<ip:port>".
 peers = []
+
+# Optional: reach peers through a relay node. Packets are end-to-end
+# encrypted; the relay only forwards opaque blobs.
+# relay = "<node_id_base32>@<ip:port>"
+# relay_peers = ["<node_id_base32>"]

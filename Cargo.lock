@@ -1205,6 +1205,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "lep2p-core",
+ "lep2p-e2ee",
  "lep2p-identity",
  "lep2p-transport",
  "serde",

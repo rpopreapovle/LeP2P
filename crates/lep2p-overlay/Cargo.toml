@@ -8,6 +8,7 @@ license.workspace = true
 lep2p-core.workspace = true
 lep2p-identity.workspace = true
 lep2p-transport.workspace = true
+lep2p-e2ee.workspace = true
 tokio.workspace = true
 async-trait = "0.1"
 serde.workspace = true
