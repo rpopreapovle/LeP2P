@@ -8,7 +8,7 @@
 pub mod router;
 
 use lep2p_core::{
-    Capabilities, NodeInfo, SCHEMA_VERSION, ALPN_CONTROL,
+    Capabilities, NodeInfo, SCHEMA_VERSION, ALPN_CONTROL, ALPN_OVERLAY,
 };
 use lep2p_e2ee::KeyBundle;
 use lep2p_identity::{tls, Identity, NodeId};
@@ -209,7 +209,7 @@ impl NodeTransport {
         let identity = Arc::new(identity);
         let server_tls = tls::build_server_tls(&identity)?;
         let mut scrypto = tls::server_config(&server_tls)?;
-        scrypto.alpn_protocols = vec![ALPN_CONTROL.to_vec()];
+        scrypto.alpn_protocols = vec![ALPN_CONTROL.to_vec(), ALPN_OVERLAY.to_vec()];
 
         let quinn_server_cfg =
             quinn::ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(scrypto)?));
@@ -276,15 +276,17 @@ impl NodeTransport {
         &self.endpoint
     }
 
-    /// Open a control (HTTP/3) connection to a peer, verifying its NodeId via TLS.
-    pub async fn connect(
+    /// Open a QUIC connection to a peer with the given ALPN, verifying its
+    /// NodeId via pinned TLS.
+    async fn connect_quic(
         &self,
         addr: SocketAddr,
         expected_peer: NodeId,
-    ) -> anyhow::Result<Peer> {
+        alpn: &[u8],
+    ) -> anyhow::Result<quinn::Connection> {
         let own_tls = tls::build_server_tls(&self.identity)?;
         let mut cctls = tls::client_config(expected_peer, &own_tls)?;
-        cctls.alpn_protocols = vec![ALPN_CONTROL.to_vec()];
+        cctls.alpn_protocols = vec![alpn.to_vec()];
         let cc = quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(cctls)?,
         ));
@@ -295,13 +297,47 @@ impl NodeTransport {
         }
 
         let connecting = self.endpoint.connect_with(cc, addr, "lep2p")?;
-        let conn = connecting.await?;
+        Ok(connecting.await?)
+    }
+
+    /// Open a control (HTTP/3) connection to a peer, verifying its NodeId via TLS.
+    pub async fn connect(
+        &self,
+        addr: SocketAddr,
+        expected_peer: NodeId,
+    ) -> anyhow::Result<Peer> {
+        let conn = self.connect_quic(addr, expected_peer, ALPN_CONTROL).await?;
         let observed = conn.remote_address();
         Ok(Peer::new(conn, expected_peer, observed))
     }
 
-    /// Serve the control plane forever: accept QUIC conns, speak HTTP/3, route JSON.
+    /// Open a data-plane connection (raw bidi streams, ALPN `lep2p-overlay`).
+    pub async fn connect_data(
+        &self,
+        addr: SocketAddr,
+        expected_peer: NodeId,
+    ) -> anyhow::Result<DataConn> {
+        let conn = self.connect_quic(addr, expected_peer, ALPN_OVERLAY).await?;
+        Ok(DataConn {
+            conn,
+            peer: Some(expected_peer),
+        })
+    }
+
+    /// Serve the control plane forever (data-plane connections are refused).
     pub async fn serve_control(self: Arc<Self>, router: Arc<Router>) -> anyhow::Result<()> {
+        self.serve_with(router, None).await
+    }
+
+    /// Serve control (HTTP/3) and optionally data-plane connections on the
+    /// single QUIC endpoint. Connections are dispatched by negotiated ALPN:
+    /// `h3` goes to the JSON control router, `lep2p-overlay` to the
+    /// [`DataHandler`] (when configured).
+    pub async fn serve_with(
+        self: Arc<Self>,
+        router: Arc<Router>,
+        data: Option<Arc<dyn DataHandler>>,
+    ) -> anyhow::Result<()> {
         loop {
             let incoming = match self.endpoint.accept().await {
                 Some(i) => i,
@@ -309,6 +345,7 @@ impl NodeTransport {
             };
             let me = self.clone();
             let router = router.clone();
+            let data = data.clone();
             tokio::spawn(async move {
                 let conn = match incoming.await {
                     Ok(c) => c,
@@ -317,6 +354,18 @@ impl NodeTransport {
                         return;
                     }
                 };
+                if conn_alpn(&conn).as_deref() == Some(ALPN_OVERLAY) {
+                    match data {
+                        Some(handler) => {
+                            let peer = peer_cert_node_id(&conn);
+                            handler.on_data(DataConn { conn, peer }).await;
+                        }
+                        None => {
+                            conn.close(quinn::VarInt::from_u32(0), b"data plane disabled");
+                        }
+                    }
+                    return;
+                }
                 if let Err(e) = me.serve_h3_conn(conn, router).await {
                     tracing::debug!("control error: {e}");
                 }
@@ -392,6 +441,104 @@ impl NodeTransport {
         }
         Ok(())
     }
+}
+
+/// Maximum size of a framed data-plane packet (64 KiB).
+pub const MAX_PACKET_LEN: usize = 64 * 1024;
+
+/// Handler for accepted data-plane connections.
+#[async_trait::async_trait]
+pub trait DataHandler: Send + Sync + 'static {
+    /// Called once for every accepted `lep2p-overlay` connection. Implementors
+    /// typically spawn a task per connection and accept streams from it.
+    async fn on_data(&self, conn: DataConn);
+}
+
+/// A data-plane connection carrying raw framed packets over QUIC bidi streams.
+#[derive(Clone)]
+pub struct DataConn {
+    conn: quinn::Connection,
+    peer: Option<NodeId>,
+}
+
+impl DataConn {
+    /// Authenticated peer identity from its TLS certificate, if available.
+    pub fn peer_node_id(&self) -> Option<NodeId> {
+        self.peer
+    }
+
+    pub fn remote_address(&self) -> SocketAddr {
+        self.conn.remote_address()
+    }
+
+    /// Open a new bidirectional data stream to the peer.
+    pub async fn open_stream(&self) -> anyhow::Result<DataStream> {
+        let (send, recv) = self.conn.open_bi().await?;
+        Ok(DataStream { send, recv })
+    }
+
+    /// Accept a bidirectional data stream opened by the peer.
+    pub async fn accept_stream(&self) -> anyhow::Result<DataStream> {
+        let (send, recv) = self.conn.accept_bi().await?;
+        Ok(DataStream { send, recv })
+    }
+
+    /// Close the data connection with a reason.
+    pub fn close(&self, reason: &str) {
+        self.conn
+            .close(quinn::VarInt::from_u32(0), reason.as_bytes());
+    }
+}
+
+/// One bidirectional stream of length-prefixed packets.
+pub struct DataStream {
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+}
+
+impl DataStream {
+    /// Send one framed packet: `len (u32 BE) || bytes`.
+    pub async fn send_packet(&mut self, packet: &[u8]) -> anyhow::Result<()> {
+        if packet.len() > MAX_PACKET_LEN {
+            anyhow::bail!("packet exceeds {MAX_PACKET_LEN} bytes");
+        }
+        self.send
+            .write_all(&(packet.len() as u32).to_be_bytes())
+            .await?;
+        self.send.write_all(packet).await?;
+        Ok(())
+    }
+
+    /// Receive one framed packet; `Ok(None)` on a clean end of stream.
+    pub async fn recv_packet(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
+        let mut len_buf = [0u8; 4];
+        match self.recv.read_exact(&mut len_buf).await {
+            Ok(()) => {}
+            Err(quinn::ReadExactError::FinishedEarly(0)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+        let len = u32::from_be_bytes(len_buf) as usize;
+        if len > MAX_PACKET_LEN {
+            anyhow::bail!("peer sent oversized packet: {len} bytes");
+        }
+        let mut packet = vec![0u8; len];
+        self.recv.read_exact(&mut packet).await?;
+        Ok(Some(packet))
+    }
+
+    /// Finish the sending side; the peer observes a clean end of stream.
+    pub fn finish(&mut self) -> anyhow::Result<()> {
+        self.send.finish()?;
+        Ok(())
+    }
+}
+
+/// Extract the negotiated ALPN protocol of a connection.
+fn conn_alpn(conn: &quinn::Connection) -> Option<Vec<u8>> {
+    conn.handshake_data()?
+        .downcast::<quinn_proto::crypto::rustls::HandshakeData>()
+        .ok()?
+        .protocol
 }
 
 /// Extract the authenticated peer `NodeId` from the TLS client certificate

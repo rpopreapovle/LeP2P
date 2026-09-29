@@ -126,8 +126,10 @@ Capability advertisement: `ping`/`connect` respond with `capabilities` so the ca
 
 ---
 
-## M2 (future, design only)
-- `lep2p-overlay`: create TUN device via `tun` crate; forward mesh packets node→node through raw QUIC bidi streams (E2EE). OS routing handles the virtual network (transparent for games/crypto). HTTP/3 JSON remains control-only.
+## M2 (in progress)
+- **M2.1 (done)**: data plane — raw QUIC bidi streams (ALPN `lep2p-overlay`) carrying length-prefixed packets. `NodeTransport::connect_data` / `serve_with` with ALPN dispatch on the single endpoint; `DataConn` / `DataStream`; peer identity from mutual TLS.
+- **M2.2 (next)**: `lep2p-overlay` — create TUN device via `tun` crate; forward mesh packets node→node through the data plane. OS routing handles the virtual network (transparent for games/crypto). HTTP/3 JSON remains control-only.
+- **M2.3**: relay data plane — indirect paths with end-to-end encryption between endpoints.
 - Relay proxy implementation for the relay trait.
 
 ## Conventions

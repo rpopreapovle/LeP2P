@@ -24,6 +24,8 @@ STUN/TURN/control ports and no external services required.
 - **NAT traversal**: binding reflection (built-in STUN analog) and UDP hole
   punching via a rendezvous peer, plus a pluggable relay/TURN trait (stub).
 - **Kademlia DHT** over the control plane for peer discovery.
+- **Data plane**: raw QUIC bidi streams (ALPN `lep2p-overlay`) with
+  length-prefixed packets, ready for the TUN overlay (milestone 2).
 
 ## Layout
 

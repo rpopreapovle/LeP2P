@@ -13,6 +13,10 @@
 - **Wire obfuscation**: QUIC datagrams are XOR-whitened with a keyed keystream
   derived from the receiving node's identity (`lep2p-obfs`), hiding QUIC/TLS
   signatures from DPI.
+- **Data plane**: raw bidi streams (ALPN `lep2p-overlay`) run over the same
+  mutually authenticated TLS 1.3 connections, so per-hop confidentiality and
+  integrity hold. End-to-end encryption for *relayed* overlay traffic is the
+  M2.3 item below.
 - **Identity binding**: the overlay IPv6 address is derived from the public
   key, so `address == identity`; mismatches cause the peer to be dropped.
 
