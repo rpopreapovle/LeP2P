@@ -26,8 +26,7 @@ async fn serve_node(seed: &str) -> (Arc<NodeTransport>, SocketAddr, Arc<PeerTabl
     let peers = Arc::new(PeerTable::default());
     let table = Arc::new(RwLock::new(lep2p_dht::RoutingTable::default()));
     table.write().unwrap().set_self(transport.node_id());
-    let store: Arc<RwLock<HashMap<String, (String, u64)>>> =
-        Arc::new(RwLock::new(HashMap::new()));
+    let store: lep2p_dht::ValueStore = Arc::new(RwLock::new(HashMap::new()));
 
     let router = Arc::new(Router::default());
     router.register("/v1/hello", Hello(peers.clone()));

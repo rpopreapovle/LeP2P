@@ -1020,6 +1020,7 @@ dependencies = [
  "async-trait",
  "hickory-resolver",
  "lep2p-core",
+ "lep2p-e2ee",
  "lep2p-identity",
  "lep2p-nat",
  "lep2p-transport",

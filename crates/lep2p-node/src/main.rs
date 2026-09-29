@@ -15,9 +15,8 @@ use lep2p_nat::{
 };
 use lep2p_transport::{CallCtx, Endpoint, EndpointResult, NodeTransport, PeerTable, Router};
 use serde_json::json;
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// CLI entrypoint.
 #[derive(Parser, Debug)]
@@ -127,7 +126,7 @@ async fn run(identity: Identity, cfg: Config) -> anyhow::Result<()> {
     let dht = Arc::new(DhtNode::new(transport.clone()));
     dht.table.write().unwrap().set_self(node_id);
     let peers: Arc<PeerTable> = dht.peers.clone();
-    let store: Arc<RwLock<HashMap<String, (String, u64)>>> = dht.store.clone();
+    let store = dht.store.clone();
 
     // Wire the control endpoints.
     let relay_queues = RelayQueues::default();

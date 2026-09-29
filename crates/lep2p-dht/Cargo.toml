@@ -9,6 +9,7 @@ lep2p-transport.workspace = true
 lep2p-core.workspace = true
 lep2p-identity.workspace = true
 lep2p-nat.workspace = true
+lep2p-e2ee.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

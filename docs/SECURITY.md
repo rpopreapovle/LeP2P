@@ -53,6 +53,10 @@ the workspace provides `lep2p-e2ee`:
 - **Sealed-blob relay**: `/v1/relay/blob` queues a sealed blob in the target's
   mailbox on any node; the target drains it with `/v1/relay/pull`. The relay
   forwards opaque bytes and cannot read or meaningfully modify them.
+- **Sealed DHT records**: `/v1/dht/put` accepts a record sealed to the intended
+  reader's `KeyBundle` (`DhtNode::put_sealed`); the storage node keeps only
+  ciphertext. Readers fetch and open it with `DhtNode::get_sealed`. The
+  publisher's bundle is checked against the TLS-authenticated sender.
 
 Security properties: confidentiality and integrity against any node that is
 not one of the two endpoints, including relays. Key compromise of one identity
@@ -62,8 +66,9 @@ does not expose other pairs (per-pair keys).
 
 - Ephemeral X25519 (per-session) + key ratchet for forward secrecy in the M2
   data plane.
-- Seal DHT `put/get` and relay offers with `lep2p-e2ee` so intermediate nodes
-  see only opaque blobs (the relay mailbox already does this).
+- Seal relay offers and other coordination metadata with `lep2p-e2ee`
+  (DHT values and relay blobs already support sealed modes; `find_node`
+  addresses remain visible to the queried node by design).
 - Mailbox quotas, expiration, and rate limiting to bound relay storage.
 - Signed DHT records to prevent poisoning by intermediate nodes.
 - Rate limiting and connection limits to mitigate DoS.

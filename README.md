@@ -89,7 +89,7 @@ All endpoints are HTTP/3 JSON under `/v1/`; every message carries a `v`
 | `POST /v1/relay/pull` | Drain sealed blobs addressed to the caller |
 | `POST /v1/relay/offer` | Relay address (stub; relay off by default) |
 | `POST /v1/dht/find_node` | Kademlia FIND_NODE |
-| `POST /v1/dht/put` | DHT PUT |
+| `POST /v1/dht/put` | DHT PUT (plaintext or sealed to a recipient) |
 | `POST /v1/dht/get` | DHT GET |
 
 ## Testing
