@@ -111,6 +111,35 @@ cargo test
 The end-to-end test (`lep2p/tests/slice.rs`) wires three nodes on loopback:
 rendezvous, hole punch, and DHT `find_node`.
 
+### Live tunnel test
+
+A real end-to-end overlay test without root: two daemons in separate network
+namespaces linked by a veth pair, each with a real TUN device, and a real
+ICMPv6 ping through the LeP2P tunnel:
+
+```sh
+sudo modprobe tun          # once
+./scripts/live-tun-test.sh
+```
+
+For two physical machines (run the daemon as root on each, since TUN needs
+`CAP_NET_ADMIN`):
+
+```sh
+# machine 1
+sudo ./target/release/lep2p-node --config machine1.toml   # overlay.enabled = true
+# machine 2: overlay.peers = ["<machine1_node_id>@<machine1_ip>:12345"]
+sudo ./target/release/lep2p-node --config machine2.toml
+```
+
+Then, on each machine, route the peer's overlay address through the tunnel and
+ping it:
+
+```sh
+sudo ip -6 route add <peer_overlay_ipv6>/128 dev lep2p0
+ping6 <peer_overlay_ipv6>
+```
+
 ## License
 
 GPLv3 or later. See [LICENSE](LICENSE).
