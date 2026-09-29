@@ -14,7 +14,9 @@ STUN/TURN/control ports and no external services required.
   from the public key, so an address can be verified against its owner.
 - **End-to-end encryption**: TLS 1.3 over QUIC. The node's self-signed root
   certificate is its identity; peers verify the certificate chain and the
-  overlay address binding.
+  overlay address binding. Payloads that traverse intermediate nodes
+  (rendezvous, relay) are additionally sealed with `lep2p-e2ee`
+  (X25519 + ChaCha20-Poly1305), so relays see only opaque blobs.
 - **Equal roles**: no privileged bootstrap/seed servers. DNS seeds are
   ordinary nodes publishing TXT records; any node can listen, rendezvous, or
   route.
@@ -33,9 +35,11 @@ crates/
   lep2p-nat/                  # reflect, hole punch, relay trait (stub)
   lep2p-dht/                  # Kademlia + TXT DNS seeds
   lep2p-obfs/                 # wire obfuscation of QUIC datagrams
+  lep2p-e2ee/                 # application-layer end-to-end encryption
   lep2p-overlay/              # TUN + OS routing (milestone 2)
   lep2p-node/                 # server binary + CLI + TOML config
 docs/ARCHITECTURE.md          # design notes and milestone spec
+docs/SECURITY.md              # threat model and E2EE design
 ```
 
 ## Building

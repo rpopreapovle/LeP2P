@@ -1,0 +1,18 @@
+[package]
+name = "lep2p-e2ee"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lep2p-identity.workspace = true
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+hkdf = "0.12"
+rand = "0.8"
+thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]

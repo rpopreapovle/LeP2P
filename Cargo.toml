@@ -8,6 +8,7 @@ members = [
     "crates/lep2p-nat",
     "crates/lep2p-dht",
     "crates/lep2p-obfs",
+    "crates/lep2p-e2ee",
     "crates/lep2p-overlay",
     "crates/lep2p-node",
 ]
@@ -26,6 +27,7 @@ lep2p-nat = { path = "crates/lep2p-nat" }
 lep2p-dht = { path = "crates/lep2p-dht" }
 lep2p-overlay = { path = "crates/lep2p-overlay" }
 lep2p-obfs = { path = "crates/lep2p-obfs" }
+lep2p-e2ee = { path = "crates/lep2p-e2ee" }
 
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 anyhow = "1"

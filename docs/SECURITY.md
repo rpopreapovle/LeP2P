@@ -1,0 +1,58 @@
+# Security model
+
+## What is protected today
+
+- **Per-hop transport**: every QUIC connection uses TLS 1.3. Each node's
+  self-signed root certificate *is* its identity, and the peer verifies the
+  certificate chain against the expected `NodeId` (`SHA-256(ed25519 pubkey)`).
+  On-path observers cannot read or modify traffic, and a peer cannot
+  impersonate another node.
+- **Wire obfuscation**: QUIC datagrams are XOR-whitened with a keyed keystream
+  derived from the receiving node's identity (`lep2p-obfs`), hiding QUIC/TLS
+  signatures from DPI.
+- **Identity binding**: the overlay IPv6 address is derived from the public
+  key, so `address == identity`; mismatches cause the peer to be dropped.
+
+## What intermediate nodes can see
+
+A rendezvous/relay node terminates the transport connection it receives, so it
+can see:
+
+- which `NodeId`s connect to it and when;
+- observed public `ip:port` pairs of its clients (this is inherent to NAT
+  reflection / hole punching);
+- the *plaintext* of control-plane JSON messages that clients send **to it**
+  (e.g. a punch request naming a target node).
+
+It cannot see the contents of direct peer-to-peer QUIC connections, and it
+cannot impersonate either side (TLS identity pinning).
+
+## Application-layer E2EE (`lep2p-e2ee`)
+
+To keep payloads private even when they pass through other nodes (rendezvous,
+DHT forwarding, and later the relay/TURN path and the M2 overlay data plane),
+the workspace provides `lep2p-e2ee`:
+
+- **Static key agreement**: each node derives an X25519 key deterministically
+  from its ed25519 identity (standard
+  `crypto_sign_ed25519_sk_to_curve25519` construction). The public half is
+  `to_montgomery(ed25519 pubkey)`. Peers combine their secret with the other
+  side's public key; both compute the same secret.
+- **Key schedule**: X25519 output goes through HKDF-SHA256 with a fixed salt
+  (`lep2p-e2ee-v1-kdf`) and info (`lep2p-e2ee-v1-session`).
+- **AEAD**: payloads are sealed with ChaCha20-Poly1305 as
+  `nonce (12 B) || ciphertext`. The associated data binds the message to the
+  sender and receiver (`context_aad`), preventing cross-session replay.
+
+Security properties: confidentiality and integrity against any node that is
+not one of the two endpoints, including relays. Key compromise of one identity
+does not expose other pairs (per-pair keys).
+
+## Roadmap hardening
+
+- Ephemeral X25519 (per-session) + key ratchet for forward secrecy in the M2
+  data plane.
+- Seal relayed control messages (DHT `put/get`, relay offers) with
+  `lep2p-e2ee` so rendezvous nodes see only opaque blobs.
+- Signed DHT records to prevent poisoning by intermediate nodes.
+- Rate limiting and connection limits to mitigate DoS.

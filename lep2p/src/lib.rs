@@ -7,6 +7,7 @@
 
 pub use lep2p_core as core;
 pub use lep2p_dht as dht;
+pub use lep2p_e2ee as e2ee;
 pub use lep2p_identity as identity;
 pub use lep2p_nat as nat;
 pub use lep2p_transport as transport;
