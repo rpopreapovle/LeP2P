@@ -276,28 +276,166 @@ pub struct RelayedBlob {
     pub blob: Vec<u8>,
 }
 
+/// Bounds protecting relay mailboxes from abuse and unbounded growth.
+#[derive(Clone, Debug)]
+pub struct RelayLimits {
+    /// Maximum number of queued blobs per target node.
+    pub max_blobs_per_target: usize,
+    /// Maximum size of a single sealed blob, in bytes.
+    pub max_blob_bytes: usize,
+    /// Maximum total queued bytes across all mailboxes.
+    pub max_total_bytes: usize,
+    /// Default time-to-live for queued blobs, in seconds.
+    pub default_ttl_secs: u64,
+    /// Upper bound for publisher-supplied TTLs, in seconds.
+    pub max_ttl_secs: u64,
+}
+
+impl Default for RelayLimits {
+    fn default() -> Self {
+        Self {
+            max_blobs_per_target: 64,
+            max_blob_bytes: 1024 * 1024,
+            max_total_bytes: 16 * 1024 * 1024,
+            default_ttl_secs: 300,
+            max_ttl_secs: 3600,
+        }
+    }
+}
+
+/// Why a mailbox rejected a blob.
+#[derive(Debug, thiserror::Error)]
+pub enum MailboxError {
+    #[error("blob too large")]
+    BlobTooLarge,
+    #[error("mailbox full")]
+    MailboxFull,
+    #[error("relay storage exhausted")]
+    StorageExhausted,
+}
+
+#[derive(Default)]
+struct RelayState {
+    mailboxes: HashMap<NodeId, VecDeque<QueuedBlob>>,
+    total_bytes: usize,
+}
+
+struct QueuedBlob {
+    blob: RelayedBlob,
+    expires_at: u64,
+}
+
 /// Per-target mailboxes of sealed blobs awaiting pickup.
+///
+/// Bounded by [`RelayLimits`]: per-blob size, per-target count, and total
+/// queued bytes. Expired blobs are dropped lazily.
 #[derive(Clone, Default)]
 pub struct RelayQueues {
-    inner: Arc<Mutex<HashMap<NodeId, VecDeque<RelayedBlob>>>>,
+    limits: RelayLimits,
+    state: Arc<Mutex<RelayState>>,
 }
 
 impl RelayQueues {
-    pub fn push(&self, to: NodeId, blob: RelayedBlob) {
-        self.inner
-            .lock()
-            .unwrap()
-            .entry(to)
-            .or_default()
-            .push_back(blob);
-    }
-
-    pub fn drain(&self, to: &NodeId) -> Vec<RelayedBlob> {
-        match self.inner.lock().unwrap().remove(to) {
-            Some(queue) => queue.into_iter().collect(),
-            None => Vec::new(),
+    pub fn new(limits: RelayLimits) -> Self {
+        Self {
+            limits,
+            state: Arc::new(Mutex::new(RelayState::default())),
         }
     }
+
+    /// Queue a sealed blob for `to` with an optional TTL in seconds (clamped
+    /// to `limits.max_ttl_secs`; defaults to `limits.default_ttl_secs`).
+    pub fn push(
+        &self,
+        to: NodeId,
+        blob: RelayedBlob,
+        ttl_secs: Option<u64>,
+    ) -> Result<(), MailboxError> {
+        if blob.blob.len() > self.limits.max_blob_bytes {
+            return Err(MailboxError::BlobTooLarge);
+        }
+        let ttl = ttl_secs
+            .unwrap_or(self.limits.default_ttl_secs)
+            .clamp(1, self.limits.max_ttl_secs.max(1));
+        let expires_at = now_ts() + ttl;
+
+        let mut guard = self.state.lock().unwrap();
+        let state = &mut *guard;
+        if let Some(queue) = state.mailboxes.get_mut(&to) {
+            let freed = purge_expired(queue);
+            state.total_bytes = state.total_bytes.saturating_sub(freed);
+        }
+        let queued = state.mailboxes.get(&to).map(VecDeque::len).unwrap_or(0);
+        if queued >= self.limits.max_blobs_per_target {
+            return Err(MailboxError::MailboxFull);
+        }
+        if state.total_bytes + blob.blob.len() > self.limits.max_total_bytes {
+            return Err(MailboxError::StorageExhausted);
+        }
+        state.total_bytes += blob.blob.len();
+        state
+            .mailboxes
+            .entry(to)
+            .or_default()
+            .push_back(QueuedBlob { blob, expires_at });
+        Ok(())
+    }
+
+    /// Drain non-expired blobs for `to`, freeing their storage.
+    pub fn drain(&self, to: &NodeId) -> Vec<RelayedBlob> {
+        let mut state = self.state.lock().unwrap();
+        let Some(mut queue) = state.mailboxes.remove(to) else {
+            return Vec::new();
+        };
+        let now = now_ts();
+        let mut out = Vec::with_capacity(queue.len());
+        while let Some(entry) = queue.pop_front() {
+            state.total_bytes = state.total_bytes.saturating_sub(entry.blob.blob.len());
+            if entry.expires_at > now {
+                out.push(entry.blob);
+            }
+        }
+        out
+    }
+
+    /// Total queued bytes (including not-yet-purged expired entries).
+    pub fn total_bytes(&self) -> usize {
+        self.state.lock().unwrap().total_bytes
+    }
+
+    /// Number of queued (non-expired) blobs for `to`.
+    pub fn queued(&self, to: &NodeId) -> usize {
+        let mut guard = self.state.lock().unwrap();
+        let state = &mut *guard;
+        let mut count = 0;
+        if let Some(queue) = state.mailboxes.get_mut(to) {
+            let freed = purge_expired(queue);
+            state.total_bytes = state.total_bytes.saturating_sub(freed);
+            count = queue.len();
+        }
+        count
+    }
+}
+
+/// Drop expired entries and return the number of bytes freed.
+fn purge_expired(queue: &mut VecDeque<QueuedBlob>) -> usize {
+    let now = now_ts();
+    let mut freed = 0usize;
+    queue.retain(|entry| {
+        let keep = entry.expires_at > now;
+        if !keep {
+            freed += entry.blob.blob.len();
+        }
+        keep
+    });
+    freed
+}
+
+fn now_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// `/v1/relay/blob`: accept a sealed blob from an authenticated sender and
@@ -320,6 +458,8 @@ struct RelayBlobReq {
     to: String,
     from_bundle: KeyBundle,
     blob: Vec<u8>,
+    #[serde(default)]
+    ttl: Option<u64>,
 }
 
 #[async_trait]
@@ -341,14 +481,17 @@ impl Endpoint for RelayBlobEndpoint {
             return Err(ControlError::BadRequest("target not connected".into()));
         }
 
-        self.queues.push(
-            to,
-            RelayedBlob {
-                from: from.to_base32(),
-                from_bundle: req.from_bundle,
-                blob: req.blob,
-            },
-        );
+        self.queues
+            .push(
+                to,
+                RelayedBlob {
+                    from: from.to_base32(),
+                    from_bundle: req.from_bundle,
+                    blob: req.blob,
+                },
+                req.ttl,
+            )
+            .map_err(|e| ControlError::BadRequest(e.to_string()))?;
 
         use lep2p_transport::router::ok;
         ok(json!({ "v": lep2p_core::SCHEMA_VERSION, "ok": true }))
@@ -426,7 +569,7 @@ impl NatClient {
         let blob = lep2p_e2ee::seal_authenticated(&identity, &recipient_public, &aad, payload);
         let from_bundle = KeyBundle::create(&identity);
 
-        relay
+        let resp = relay
             .request(
                 "/v1/relay/blob",
                 json!({
@@ -437,6 +580,14 @@ impl NatClient {
                 }),
             )
             .await?;
+        if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            anyhow::bail!(
+                "relay rejected blob: {}",
+                resp.get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error")
+            );
+        }
         Ok(())
     }
 
@@ -450,5 +601,112 @@ impl NatClient {
             .await?;
         let blobs = resp.get("blobs").cloned().unwrap_or(json!([]));
         Ok(serde_json::from_value(blobs)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lep2p_identity::Identity;
+
+    fn queues(limits: RelayLimits) -> RelayQueues {
+        RelayQueues::new(limits)
+    }
+
+    fn node(seed: u8) -> NodeId {
+        Identity::from_bytes(&[seed; 32]).node_id()
+    }
+
+    fn blob(size: usize) -> RelayedBlob {
+        RelayedBlob {
+            from: "sender".into(),
+            from_bundle: KeyBundle::create(&Identity::from_bytes(&[9u8; 32])),
+            blob: vec![7u8; size],
+        }
+    }
+
+    #[test]
+    fn push_drain_roundtrip_frees_storage() {
+        let q = queues(RelayLimits::default());
+        let to = node(1);
+        q.push(to, blob(10), None).unwrap();
+        q.push(to, blob(20), None).unwrap();
+        assert_eq!(q.queued(&to), 2);
+        assert_eq!(q.total_bytes(), 30);
+
+        let drained = q.drain(&to);
+        assert_eq!(drained.len(), 2);
+        assert_eq!(q.total_bytes(), 0);
+        assert!(q.drain(&to).is_empty());
+    }
+
+    #[test]
+    fn oversize_blob_is_rejected() {
+        let q = queues(RelayLimits {
+            max_blob_bytes: 4,
+            ..Default::default()
+        });
+        assert!(matches!(
+            q.push(node(1), blob(5), None),
+            Err(MailboxError::BlobTooLarge)
+        ));
+    }
+
+    #[test]
+    fn full_mailbox_is_rejected() {
+        let q = queues(RelayLimits {
+            max_blobs_per_target: 1,
+            ..Default::default()
+        });
+        let to = node(1);
+        assert!(q.push(to, blob(1), None).is_ok());
+        assert!(matches!(
+            q.push(to, blob(1), None),
+            Err(MailboxError::MailboxFull)
+        ));
+    }
+
+    #[test]
+    fn aggregate_storage_limit_is_enforced() {
+        let q = queues(RelayLimits {
+            max_blob_bytes: 4,
+            max_total_bytes: 4,
+            ..Default::default()
+        });
+        assert!(q.push(node(1), blob(4), None).is_ok());
+        assert!(matches!(
+            q.push(node(2), blob(1), None),
+            Err(MailboxError::StorageExhausted)
+        ));
+    }
+
+    #[test]
+    fn expired_blobs_are_dropped() {
+        let q = queues(RelayLimits::default());
+        let to = node(1);
+        q.push(to, blob(8), None).unwrap();
+        {
+            let mut state = q.state.lock().unwrap();
+            for queue in state.mailboxes.values_mut() {
+                for entry in queue.iter_mut() {
+                    entry.expires_at = 0;
+                }
+            }
+        }
+        assert!(q.drain(&to).is_empty());
+        assert_eq!(q.total_bytes(), 0);
+    }
+
+    #[test]
+    fn ttl_is_clamped_to_max() {
+        let q = queues(RelayLimits {
+            max_ttl_secs: 10,
+            ..Default::default()
+        });
+        let to = node(1);
+        q.push(to, blob(1), Some(3600)).unwrap();
+        let state = q.state.lock().unwrap();
+        let expires_at = state.mailboxes[&to][0].expires_at;
+        assert!(expires_at <= now_ts() + 10);
     }
 }
