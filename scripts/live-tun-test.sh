@@ -59,8 +59,8 @@ for _ in $(seq 1 15); do
     sleep 1
 done
 
-nsenter -t "$A_PID" -n ip -6 route add "$B_V6"/128 dev ov-a
-nsenter -t "$B_PID" -n ip -6 route add "$A_V6"/128 dev ov-b
+# Peer routes are installed automatically by the daemon (RouteHooks).
+nsenter -t "$A_PID" -n ip -6 route show | grep -q "$B_V6" && echo "route to peer installed"
 
 nsenter -t "$A_PID" -n ping -6 -c 3 -W 2 "$B_V6"
 

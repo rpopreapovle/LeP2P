@@ -132,11 +132,10 @@ sudo ./target/release/lep2p-node --config machine1.toml   # overlay.enabled = tr
 sudo ./target/release/lep2p-node --config machine2.toml
 ```
 
-Then, on each machine, route the peer's overlay address through the tunnel and
-ping it:
+Routes for attached peers are installed automatically by the daemon. Just
+ping the peer's overlay address:
 
 ```sh
-sudo ip -6 route add <peer_overlay_ipv6>/128 dev lep2p0
 ping6 <peer_overlay_ipv6>
 ```
 

@@ -22,6 +22,13 @@ impl DataHandler for AcceptInto {
 }
 
 async fn overlay_node(seed: &str) -> (Arc<NodeTransport>, Arc<OverlayNode>, MemoryTun) {
+    overlay_node_with_hooks(seed, None).await
+}
+
+async fn overlay_node_with_hooks(
+    seed: &str,
+    hooks: Option<Arc<dyn lep2p_overlay::RouteHooks>>,
+) -> (Arc<NodeTransport>, Arc<OverlayNode>, MemoryTun) {
     let transport = Arc::new(
         NodeTransport::bind(
             Identity::from_bytes(&hash_id(seed)),
@@ -33,12 +40,40 @@ async fn overlay_node(seed: &str) -> (Arc<NodeTransport>, Arc<OverlayNode>, Memo
         .unwrap(),
     );
     let tun = MemoryTun::new();
-    let node = OverlayNode::start(
+    let node = OverlayNode::start_with_hooks(
         transport.identity(),
         Box::new(tun.reader()),
         Arc::new(tun.writer()),
+        hooks,
     );
     (transport, node, tun)
+}
+
+#[derive(Default)]
+struct RecordingHooks {
+    added: std::sync::Mutex<Vec<Ipv6Addr>>,
+    removed: std::sync::Mutex<Vec<Ipv6Addr>>,
+}
+
+impl lep2p_overlay::RouteHooks for RecordingHooks {
+    fn route_added(&self, peer: Ipv6Addr) {
+        self.added.lock().unwrap().push(peer);
+    }
+
+    fn route_removed(&self, peer: Ipv6Addr) {
+        self.removed.lock().unwrap().push(peer);
+    }
+}
+
+async fn wait_for<F: Fn() -> bool>(check: F) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
 }
 
 async fn wait_route(node: &Arc<OverlayNode>, dst: &Ipv6Addr) -> bool {
@@ -171,4 +206,50 @@ fn hash_id(seed: &str) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&d);
     out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn os_routes_follow_peer_lifecycle() {
+    let hooks = Arc::new(RecordingHooks::default());
+    let dyn_hooks: Arc<dyn lep2p_overlay::RouteHooks> = hooks.clone();
+    let (a_transport, a_node, a_tun) =
+        overlay_node_with_hooks("hooks-a", Some(dyn_hooks)).await;
+    let (b_transport, b_node, _b_tun) = overlay_node("hooks-b").await;
+
+    // B serves the data plane into its overlay node.
+    let serve = b_transport.clone();
+    let b_for_handler = b_node.clone();
+    tokio::spawn(async move {
+        let _ = serve
+            .serve_with(
+                Arc::new(Router::default()),
+                Some(Arc::new(AcceptInto {
+                    node: b_for_handler,
+                })),
+            )
+            .await;
+    });
+
+    let conn = a_transport
+        .connect_data(b_transport.local_addr(), b_node.node_id())
+        .await
+        .unwrap();
+    a_node.add_peer(conn.clone()).await.unwrap();
+
+    let a_ip = overlay_for(&a_node.node_id());
+    let b_ip = overlay_for(&b_node.node_id());
+    assert!(
+        wait_for(|| hooks.added.lock().unwrap().contains(&b_ip)).await,
+        "hook fires when the peer route appears"
+    );
+
+    // Closing the connection must remove the route once the sender notices.
+    conn.close("bye");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    a_tun.inject(build_ipv6_packet(a_ip, b_ip, b"poke"));
+    assert!(
+        wait_for(|| hooks.removed.lock().unwrap().contains(&b_ip)).await,
+        "hook fires when the peer route disappears"
+    );
+    assert_eq!(a_node.route_count(), 0);
 }

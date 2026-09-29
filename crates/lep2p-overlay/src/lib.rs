@@ -13,9 +13,9 @@ mod memory;
 mod node;
 
 pub use lep2p_core::overlay_for;
-pub use linux::{LinuxTun, LinuxTunReader, LinuxTunWriter};
+pub use linux::{LinuxRouteHooks, LinuxTun, LinuxTunReader, LinuxTunWriter};
 pub use memory::{MemoryTun, MemoryTunReader, MemoryTunWriter};
-pub use node::{OverlayNode, PeerHello, PEER_HELLO_VERSION};
+pub use node::{OverlayNode, PeerHello, PEER_HELLO_VERSION, RELAY_FRAME_VERSION};
 
 use async_trait::async_trait;
 use std::io;
@@ -33,6 +33,18 @@ pub trait TunRead: Send + 'static {
 pub trait TunWrite: Send + Sync + 'static {
     /// Write one IP packet to the device.
     async fn write_packet(&self, packet: &[u8]) -> io::Result<()>;
+}
+
+/// Callbacks for installing and removing OS routes for overlay peers.
+///
+/// [`OverlayNode`] invokes these when a peer route appears (direct or relayed
+/// attachment) and disappears (tunnel ended), so the host kernel knows which
+/// overlay addresses to send through the TUN device.
+pub trait RouteHooks: Send + Sync + 'static {
+    /// A peer overlay address became reachable through the tunnel.
+    fn route_added(&self, peer: Ipv6Addr);
+    /// A peer overlay address is no longer reachable.
+    fn route_removed(&self, peer: Ipv6Addr);
 }
 
 /// Destination IPv6 address of a packet, if it is IPv6.

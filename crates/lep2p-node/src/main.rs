@@ -13,7 +13,7 @@ use lep2p_nat::{
     HelloEndpoint, NodeKeysEndpoint, NoRelay, PunchEndpoint, ReflectEndpoint, RelayBlobEndpoint,
     RelayEndpoint, RelayPullEndpoint, RelayQueues,
 };
-use lep2p_overlay::{LinuxTun, OverlayNode};
+use lep2p_overlay::{LinuxRouteHooks, LinuxTun, OverlayNode};
 use lep2p_transport::{
     CallCtx, DataConn, DataHandler, Endpoint, EndpointResult, NodeTransport, PeerTable, Router,
 };
@@ -178,10 +178,11 @@ async fn run(identity: Identity, cfg: Config) -> anyhow::Result<()> {
             cfg.overlay.mtu,
         )
         .context("create TUN device (needs CAP_NET_ADMIN and `modprobe tun`)")?;
-        let node = OverlayNode::start(
+        let node = OverlayNode::start_with_hooks(
             transport.identity(),
             Box::new(tun.reader()),
             Arc::new(tun.writer()),
+            Some(Arc::new(LinuxRouteHooks::new(tun.name()))),
         );
         tracing::info!(
             "overlay {} up with address {}",

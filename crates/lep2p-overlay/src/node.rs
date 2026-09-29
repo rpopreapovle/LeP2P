@@ -1,6 +1,6 @@
 //! Mesh node: routes packets between the TUN device and peer data streams.
 
-use crate::{overlay_for, packet_dst_ipv6, TunRead, TunWrite};
+use crate::{overlay_for, packet_dst_ipv6, RouteHooks, TunRead, TunWrite};
 use lep2p_core::parse_node_id;
 use lep2p_e2ee::{self, KeyBundle};
 use lep2p_identity::{Identity, NodeId};
@@ -68,6 +68,7 @@ pub struct OverlayNode {
     writer: Arc<dyn TunWrite>,
     /// Data connections currently open, keyed by peer id (for relaying).
     data_peers: RwLock<HashMap<NodeId, DataConn>>,
+    hooks: Option<Arc<dyn RouteHooks>>,
 }
 
 impl OverlayNode {
@@ -77,6 +78,16 @@ impl OverlayNode {
         reader: Box<dyn TunRead>,
         writer: Arc<dyn TunWrite>,
     ) -> Arc<Self> {
+        Self::start_with_hooks(identity, reader, writer, None)
+    }
+
+    /// Start the node with OS route hooks (see [`RouteHooks`]).
+    pub fn start_with_hooks(
+        identity: Arc<Identity>,
+        reader: Box<dyn TunRead>,
+        writer: Arc<dyn TunWrite>,
+        hooks: Option<Arc<dyn RouteHooks>>,
+    ) -> Arc<Self> {
         let overlay_ipv6 = identity.overlay_ipv6();
         let node = Arc::new(Self {
             identity,
@@ -85,6 +96,7 @@ impl OverlayNode {
             next_route_id: AtomicU64::new(1),
             writer,
             data_peers: RwLock::new(HashMap::new()),
+            hooks,
         });
 
         let reader_node = node.clone();
@@ -375,6 +387,9 @@ impl OverlayNode {
             .write()
             .unwrap()
             .insert(peer_ip, Route { id: route_id, tx });
+        if let Some(hooks) = &self.hooks {
+            hooks.route_added(peer_ip);
+        }
 
         // TUN -> seal -> stream.
         let out_identity = self.identity.clone();
@@ -406,10 +421,7 @@ impl OverlayNode {
                     break;
                 }
             }
-            let mut routes = node.routes.write().unwrap();
-            if routes.get(&peer_ip).map(|route| route.id) == Some(route_id) {
-                routes.remove(&peer_ip);
-            }
+            remove_route(&node, peer_ip, route_id);
         });
     }
 
@@ -422,6 +434,9 @@ impl OverlayNode {
             .write()
             .unwrap()
             .insert(peer_ip, Route { id: route_id, tx });
+        if let Some(hooks) = &self.hooks {
+            hooks.route_added(peer_ip);
+        }
 
         // Packets from the peer go into the TUN device.
         let writer = self.writer.clone();
@@ -442,11 +457,26 @@ impl OverlayNode {
                 }
             }
             let _ = send.finish();
-            let mut routes = node.routes.write().unwrap();
-            if routes.get(&peer_ip).map(|route| route.id) == Some(route_id) {
-                routes.remove(&peer_ip);
-            }
+            remove_route(&node, peer_ip, route_id);
         });
+    }
+}
+
+/// Remove a route if it still belongs to `route_id`, then notify the hooks.
+fn remove_route(node: &Arc<OverlayNode>, peer_ip: Ipv6Addr, route_id: u64) {
+    let removed = {
+        let mut routes = node.routes.write().unwrap();
+        if routes.get(&peer_ip).map(|route| route.id) == Some(route_id) {
+            routes.remove(&peer_ip);
+            true
+        } else {
+            false
+        }
+    };
+    if removed {
+        if let Some(hooks) = &node.hooks {
+            hooks.route_removed(peer_ip);
+        }
     }
 }
 

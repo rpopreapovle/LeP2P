@@ -4,13 +4,42 @@
 //! root, or grant the capability) and the kernel `tun` module
 //! (`sudo modprobe tun`).
 
-use crate::{TunRead, TunWrite};
+use crate::{RouteHooks, TunRead, TunWrite};
 use async_trait::async_trait;
 use std::io;
 use std::net::Ipv6Addr;
 use std::process::Command;
 use std::sync::Arc;
 use tun::AbstractDevice as _;
+
+/// Installs and removes peer `/128` routes on a Linux TUN device via `ip`.
+pub struct LinuxRouteHooks {
+    device: String,
+}
+
+impl LinuxRouteHooks {
+    pub fn new(device: impl Into<String>) -> Self {
+        Self {
+            device: device.into(),
+        }
+    }
+}
+
+impl RouteHooks for LinuxRouteHooks {
+    fn route_added(&self, peer: Ipv6Addr) {
+        let route = format!("{peer}/128");
+        if let Err(e) = run_ip(&["-6", "route", "replace", &route, "dev", &self.device]) {
+            tracing::warn!("failed to add overlay route {route}: {e}");
+        }
+    }
+
+    fn route_removed(&self, peer: Ipv6Addr) {
+        let route = format!("{peer}/128");
+        if let Err(e) = run_ip(&["-6", "route", "del", &route, "dev", &self.device]) {
+            tracing::debug!("failed to remove overlay route {route}: {e}");
+        }
+    }
+}
 
 /// A Linux TUN device with its overlay address configured.
 pub struct LinuxTun {
