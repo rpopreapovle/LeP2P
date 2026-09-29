@@ -1,0 +1,4 @@
+listen = "0.0.0.0:12345"
+keyfile = "node.key"
+seeds = ["_lep2p.n1ko.dev"]
+relay = { enabled = false, methods = [] }

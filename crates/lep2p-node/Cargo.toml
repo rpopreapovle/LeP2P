@@ -1,0 +1,25 @@
+[package]
+name = "lep2p-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lep2p-node"
+path = "src/main.rs"
+
+[dependencies]
+lep2p-transport.workspace = true
+lep2p-core.workspace = true
+lep2p-identity.workspace = true
+lep2p-nat.workspace = true
+lep2p-dht.workspace = true
+tokio.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+async-trait = "0.1"

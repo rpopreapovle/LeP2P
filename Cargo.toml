@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "lep2p",
+    "crates/lep2p-identity",
+    "crates/lep2p-core",
+    "crates/lep2p-transport",
+    "crates/lep2p-nat",
+    "crates/lep2p-dht",
+    "crates/lep2p-obfs",
+    "crates/lep2p-overlay",
+    "crates/lep2p-node",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/rpopreapovle/LeP2P"
+
+[workspace.dependencies]
+lep2p-identity = { path = "crates/lep2p-identity" }
+lep2p-core = { path = "crates/lep2p-core" }
+lep2p-transport = { path = "crates/lep2p-transport" }
+lep2p-nat = { path = "crates/lep2p-nat" }
+lep2p-dht = { path = "crates/lep2p-dht" }
+lep2p-overlay = { path = "crates/lep2p-overlay" }
+lep2p-obfs = { path = "crates/lep2p-obfs" }
+
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[patch.crates-io]
+h3-quinn = { path = "vendor/h3-quinn" }
+
+[profile.release]
+lto = "thin"

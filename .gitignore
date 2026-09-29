@@ -1,0 +1,20 @@
+# Build artifacts
+/target
+
+# Node identity keys (secret!)
+*.key
+node.key
+
+# Local node config (contains machine-specific paths)
+lep2p-node.toml
+
+# Logs
+*.log
+
+# Test / debug binaries
+/holepunch
+/relay
+
+# Editor / OS noise
+*.swp
+.DS_Store

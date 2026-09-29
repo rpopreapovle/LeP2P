@@ -1,0 +1,14 @@
+[package]
+name = "lep2p-obfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lep2p-identity.workspace = true
+quinn = { version = "0.11", default-features = false, features = ["ring", "runtime-tokio", "rustls"] }
+quinn-udp = "0.5"
+tokio.workspace = true
+sha2 = "0.10"
+futures = "0.3"
+tracing = "0.1"

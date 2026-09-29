@@ -1,0 +1,19 @@
+[package]
+name = "lep2p-dht"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lep2p-transport.workspace = true
+lep2p-core.workspace = true
+lep2p-identity.workspace = true
+lep2p-nat.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+async-trait = "0.1"
+thiserror = "2"
+anyhow.workspace = true
+hickory-resolver = "0.24"

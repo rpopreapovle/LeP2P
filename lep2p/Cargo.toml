@@ -1,0 +1,29 @@
+[package]
+name = "lep2p"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base32 = "0.5"
+lep2p-identity.workspace = true
+lep2p-core.workspace = true
+lep2p-transport.workspace = true
+lep2p-nat.workspace = true
+lep2p-obfs.workspace = true
+lep2p-dht.workspace = true
+lep2p-overlay.workspace = true
+
+[features]
+default = ["transport", "nat", "dht"]
+transport = []
+nat = []
+dht = []
+overlay = []
+
+[dev-dependencies]
+anyhow.workspace = true
+sha2 = "0.10"
+async-trait = "0.1"
+tokio.workspace = true
+serde_json.workspace = true
