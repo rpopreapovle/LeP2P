@@ -15,8 +15,9 @@ STUN/TURN/control ports and no external services required.
 - **End-to-end encryption**: TLS 1.3 over QUIC. The node's self-signed root
   certificate is its identity; peers verify the certificate chain and the
   overlay address binding. Payloads that traverse intermediate nodes
-  (rendezvous, relay) are additionally sealed with `lep2p-e2ee`
-  (X25519 + ChaCha20-Poly1305), so relays see only opaque blobs.
+  (rendezvous, relay, DHT storage) are additionally sealed with `lep2p-e2ee`
+  (authenticated X25519 sealed boxes + ChaCha20-Poly1305, sender-side forward
+  secrecy), so relays see only opaque blobs.
 - **Equal roles**: no privileged bootstrap/seed servers. DNS seeds are
   ordinary nodes publishing TXT records; any node can listen, rendezvous, or
   route.

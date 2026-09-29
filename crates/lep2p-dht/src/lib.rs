@@ -299,11 +299,14 @@ impl DhtNode {
         let reader_id = reader_bundle
             .node_id()
             .ok_or_else(|| anyhow::anyhow!("invalid reader key bundle"))?;
-        let shared = reader_bundle
-            .shared_key_with(&identity)
+        if !reader_bundle.verify(&reader_id) {
+            anyhow::bail!("reader key bundle failed verification");
+        }
+        let reader_public = reader_bundle
+            .x25519()
             .ok_or_else(|| anyhow::anyhow!("invalid reader key bundle"))?;
         let aad = lep2p_e2ee::context_aad(&identity.node_id(), &reader_id);
-        let blob = lep2p_e2ee::seal(&shared, &aad, payload);
+        let blob = lep2p_e2ee::seal_authenticated(&identity, &reader_public, &aad, payload);
 
         let sealed = SealedRecord {
             to: reader_id.to_base32(),
@@ -354,12 +357,17 @@ impl DhtNode {
         if to != identity.node_id() {
             anyhow::bail!("record is sealed to a different node");
         }
-        let shared = sealed
+        let sender_public = sealed
             .from_bundle
-            .shared_key_with(&identity)
-            .ok_or_else(|| anyhow::anyhow!("key agreement failed"))?;
+            .x25519()
+            .ok_or_else(|| anyhow::anyhow!("invalid sender key"))?;
         let aad = lep2p_e2ee::context_aad(&from_id, &to);
-        Ok(Some(lep2p_e2ee::open(&shared, &aad, &sealed.blob)?))
+        Ok(Some(lep2p_e2ee::open_authenticated(
+            &identity,
+            &sender_public,
+            &aad,
+            &sealed.blob,
+        )?))
     }
 
     /// Bootstrap from TXT DNS seeds; returns connected peers.

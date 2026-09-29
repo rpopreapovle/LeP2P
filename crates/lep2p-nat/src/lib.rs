@@ -416,11 +416,14 @@ impl NatClient {
         payload: &[u8],
     ) -> anyhow::Result<()> {
         let identity = self.transport.identity();
-        let shared = target_bundle
-            .shared_key_with(&identity)
+        if !target_bundle.verify(&target) {
+            anyhow::bail!("target key bundle failed verification");
+        }
+        let recipient_public = target_bundle
+            .x25519()
             .ok_or_else(|| anyhow::anyhow!("invalid target key bundle"))?;
         let aad = lep2p_e2ee::context_aad(&identity.node_id(), &target);
-        let blob = lep2p_e2ee::seal(&shared, &aad, payload);
+        let blob = lep2p_e2ee::seal_authenticated(&identity, &recipient_public, &aad, payload);
         let from_bundle = KeyBundle::create(&identity);
 
         relay

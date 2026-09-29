@@ -180,9 +180,10 @@ async fn run(identity: Identity, cfg: Config) -> anyhow::Result<()> {
                         if !blob.from_bundle.verify(&from_id) {
                             return None;
                         }
-                        let key = blob.from_bundle.shared_key_with(&identity)?;
+                        let sender_public = blob.from_bundle.x25519()?;
                         let aad = lep2p_e2ee::context_aad(&from_id, &identity.node_id());
-                        lep2p_e2ee::open(&key, &aad, &blob.blob).ok()
+                        lep2p_e2ee::open_authenticated(&identity, &sender_public, &aad, &blob.blob)
+                            .ok()
                     });
                     match (from_id, opened) {
                         (_, Some(plain)) => tracing::info!(

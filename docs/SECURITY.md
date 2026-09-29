@@ -47,9 +47,15 @@ the workspace provides `lep2p-e2ee`:
   a node's ed25519 identity and its X25519 key. Bundles can be published
   through untrusted intermediaries (`/v1/hello`, `/v1/node/keys`) because a
   substituted bundle fails signature and `NodeId` checks.
-- **AEAD**: payloads are sealed with ChaCha20-Poly1305 as
-  `nonce (12 B) || ciphertext`. The associated data binds the message to the
-  sender and receiver (`context_aad`), preventing cross-session replay.
+- **AEAD**: payloads are sealed with ChaCha20-Poly1305; the associated data
+  binds the message to the sender and receiver (`context_aad`), preventing
+  cross-session replay. Relay blobs and sealed DHT records use
+  **authenticated sealed boxes**: `ephemeral_pub (32) || nonce (12) ||
+  ciphertext`, where the key mixes the static-static DH (which authenticates
+  the sender — only the sender or recipient can produce a box that opens) with
+  an ephemeral-static DH (which gives **sender-side forward secrecy**: later
+  compromise of the sender's static key does not expose previously sent
+  payloads).
 - **Sealed-blob relay**: `/v1/relay/blob` queues a sealed blob in the target's
   mailbox on any node; the target drains it with `/v1/relay/pull`. The relay
   forwards opaque bytes and cannot read or meaningfully modify them.
@@ -64,8 +70,9 @@ does not expose other pairs (per-pair keys).
 
 ## Roadmap hardening
 
-- Ephemeral X25519 (per-session) + key ratchet for forward secrecy in the M2
-  data plane.
+- Sender-side forward secrecy is implemented for sealed payloads (ephemeral
+  X25519 mixed into the key schedule). The M2 data plane still needs a
+  receiver-side ratchet for full forward secrecy.
 - Seal relay offers and other coordination metadata with `lep2p-e2ee`
   (DHT values and relay blobs already support sealed modes; `find_node`
   addresses remain visible to the queried node by design).

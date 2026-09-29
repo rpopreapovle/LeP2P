@@ -110,12 +110,14 @@ async fn sealed_blob_relays_without_plaintext_exposure() {
         "ciphertext leaked plaintext"
     );
 
-    let key = relayed
-        .from_bundle
-        .shared_key_with(&b_node.identity())
-        .expect("shared key");
     let aad = e2ee::context_aad(&a_node.node_id(), &b_node.node_id());
-    let opened = e2ee::open(&key, &aad, &relayed.blob).expect("B opens the sealed blob");
+    let opened = e2ee::open_authenticated(
+        &b_node.identity(),
+        &relayed.from_bundle.x25519().expect("sender key"),
+        &aad,
+        &relayed.blob,
+    )
+    .expect("B opens the sealed blob");
     assert_eq!(opened.as_slice(), secret);
 }
 

@@ -41,8 +41,14 @@ use zeroize::Zeroize;
 const HKDF_SALT: &[u8] = b"lep2p-e2ee-v1-kdf";
 /// HKDF info for the shared session key.
 const HKDF_INFO: &[u8] = b"lep2p-e2ee-v1-session";
+/// HKDF salt for authenticated sealed boxes.
+const HKDF_SALT_AUTH: &[u8] = b"lep2p-e2ee-v1-kdf-auth";
+/// HKDF info prefix for authenticated sealed boxes.
+const HKDF_INFO_AUTH: &[u8] = b"lep2p-e2ee-v1-sealed-box";
 /// Nonce length of ChaCha20-Poly1305.
 pub const NONCE_LEN: usize = 12;
+/// Length of an X25519 public key.
+pub const PUBLIC_KEY_LEN: usize = 32;
 
 /// Errors from unsealing or key derivation.
 #[derive(Debug, thiserror::Error)]
@@ -200,6 +206,101 @@ impl KeyBundle {
     }
 }
 
+/// HKDF-SHA256 helper producing a 32-byte key.
+fn hkdf32(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
+    let mut key = [0u8; 32];
+    hk.expand(info, &mut key)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    key
+}
+
+/// Seal `plaintext` from `sender` to the holder of `recipient_public`
+/// (ephemeral-static ECIES mixed with the static-static DH).
+///
+/// Layout: `ephemeral_pub (32) || nonce (12) || ciphertext`.
+///
+/// Both parties must know each other's static public keys. The static DH
+/// authenticates the sender: only the sender (or the recipient) can produce a
+/// box that opens under the pair key. The ephemeral DH adds **sender-side
+/// forward secrecy** — compromising the sender's static key later does not
+/// expose previously sent payloads.
+pub fn seal_authenticated(
+    sender: &Identity,
+    recipient_public: &[u8; 32],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let mut sender_secret = x25519_secret(sender);
+    let mut static_shared = x25519_dalek::x25519(sender_secret, *recipient_public);
+    sender_secret.zeroize();
+
+    let ephemeral = x25519_dalek::EphemeralSecret::random_from_rng(rand::thread_rng());
+    let ephemeral_pub = x25519_dalek::PublicKey::from(&ephemeral).to_bytes();
+    let ephemeral_shared = ephemeral.diffie_hellman(&x25519_dalek::PublicKey::from(*recipient_public));
+
+    let mut ikm = Vec::with_capacity(64);
+    ikm.extend_from_slice(&static_shared);
+    ikm.extend_from_slice(ephemeral_shared.as_bytes());
+    let key = hkdf32(
+        HKDF_SALT_AUTH,
+        &ikm,
+        &sealed_box_info(&ephemeral_pub, &public_key(sender), recipient_public),
+    );
+    ikm.zeroize();
+    static_shared.zeroize();
+
+    let sealed_body = seal(&key, aad, plaintext);
+    let mut out = Vec::with_capacity(PUBLIC_KEY_LEN + sealed_body.len());
+    out.extend_from_slice(&ephemeral_pub);
+    out.extend_from_slice(&sealed_body);
+    out
+}
+
+/// Open a box produced by [`seal_authenticated`].
+///
+/// The caller must supply the sender's static X25519 public key (e.g. from its
+/// verified [`KeyBundle`]); using the wrong key fails authentication.
+pub fn open_authenticated(
+    recipient: &Identity,
+    sender_public: &[u8; 32],
+    aad: &[u8],
+    sealed: &[u8],
+) -> Result<Vec<u8>, E2eeError> {
+    if sealed.len() < PUBLIC_KEY_LEN + NONCE_LEN + 16 {
+        return Err(E2eeError::Malformed);
+    }
+    let (ephemeral_pub, body) = sealed.split_at(PUBLIC_KEY_LEN);
+    let ephemeral_pub: [u8; 32] = ephemeral_pub.try_into().expect("slice length checked");
+
+    let mut recipient_secret = x25519_secret(recipient);
+    let mut static_shared = x25519_dalek::x25519(recipient_secret, *sender_public);
+    let ephemeral_shared = x25519_dalek::x25519(recipient_secret, ephemeral_pub);
+    recipient_secret.zeroize();
+
+    let mut ikm = Vec::with_capacity(64);
+    ikm.extend_from_slice(&static_shared);
+    ikm.extend_from_slice(&ephemeral_shared);
+    let key = hkdf32(
+        HKDF_SALT_AUTH,
+        &ikm,
+        &sealed_box_info(&ephemeral_pub, sender_public, &public_key(recipient)),
+    );
+    ikm.zeroize();
+    static_shared.zeroize();
+
+    open(&key, aad, body)
+}
+
+fn sealed_box_info(ephemeral_pub: &[u8; 32], sender_public: &[u8; 32], recipient_public: &[u8; 32]) -> Vec<u8> {
+    let mut info = Vec::with_capacity(HKDF_INFO_AUTH.len() + 96);
+    info.extend_from_slice(HKDF_INFO_AUTH);
+    info.extend_from_slice(ephemeral_pub);
+    info.extend_from_slice(sender_public);
+    info.extend_from_slice(recipient_public);
+    info
+}
+
 /// Seal `plaintext` under `key` with `aad`, returning `nonce || ciphertext`.
 pub fn seal(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     let cipher = ChaCha20Poly1305::new(key.into());
@@ -337,5 +438,54 @@ mod tests {
         let (a, b, _) = identities();
         let bundle = KeyBundle::create(&a);
         assert!(!bundle.verify(&b.node_id()));
+    }
+
+    #[test]
+    fn authenticated_box_roundtrip_and_sender_binding() {
+        let (a, b, c) = identities();
+        let aad = context_aad(&a.node_id(), &b.node_id());
+        let msg = b"forward-secret payload";
+
+        let sealed = seal_authenticated(&a, &public_key(&b), &aad, msg);
+        let opened = open_authenticated(&b, &public_key(&a), &aad, &sealed).unwrap();
+        assert_eq!(opened, msg);
+
+        // A different sender key must not open the box.
+        assert!(matches!(
+            open_authenticated(&b, &public_key(&c), &aad, &sealed),
+            Err(E2eeError::AuthFailed)
+        ));
+    }
+
+    #[test]
+    fn authenticated_box_tamper_and_truncation_rejected() {
+        let (a, b, _) = identities();
+        let aad = context_aad(&a.node_id(), &b.node_id());
+
+        let mut sealed = seal_authenticated(&a, &public_key(&b), &aad, b"hello");
+        let last = sealed.len() - 1;
+        sealed[last] ^= 0x01;
+        assert!(matches!(
+            open_authenticated(&b, &public_key(&a), &aad, &sealed),
+            Err(E2eeError::AuthFailed)
+        ));
+
+        assert!(matches!(
+            open_authenticated(&b, &public_key(&a), &aad, &sealed[..20]),
+            Err(E2eeError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn authenticated_boxes_use_fresh_ephemeral_keys() {
+        let (a, b, _) = identities();
+        let aad = context_aad(&a.node_id(), &b.node_id());
+        let first = seal_authenticated(&a, &public_key(&b), &aad, b"m");
+        let second = seal_authenticated(&a, &public_key(&b), &aad, b"m");
+        assert_ne!(
+            first[..PUBLIC_KEY_LEN],
+            second[..PUBLIC_KEY_LEN],
+            "each box must embed a fresh ephemeral key"
+        );
     }
 }
