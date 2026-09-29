@@ -66,6 +66,11 @@ the workspace provides `lep2p-e2ee`:
   reader's `KeyBundle` (`DhtNode::put_sealed`); the storage node keeps only
   ciphertext. Readers fetch and open it with `DhtNode::get_sealed`. The
   publisher's bundle is checked against the TLS-authenticated sender.
+- **Signed DHT records**: plaintext records can be signed by their publisher
+  (`DhtNode::put_signed`); readers fetch them with `DhtNode::get_signed` and a
+  required publisher, so a storage node cannot alter or swap values undetected.
+  The first authenticated record under a key owns it: overwrites from other
+  publishers and unsigned overwrites of owned keys are rejected.
 
 Security properties: confidentiality and integrity against any node that is
 not one of the two endpoints, including relays. Key compromise of one identity
@@ -81,5 +86,5 @@ does not expose other pairs (per-pair keys).
   addresses remain visible to the queried node by design).
 - Mailbox quotas and TTLs are implemented (`RelayLimits`); request rate
   limiting and connection limits remain to bound other surfaces.
-- Signed DHT records to prevent poisoning by intermediate nodes.
 - Rate limiting and connection limits to mitigate DoS.
+- Key rotation and revocation for long-lived identities.

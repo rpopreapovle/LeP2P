@@ -100,7 +100,9 @@ async fn storage_node_cannot_read_sealed_records() {
                     "stored ciphertext leaked the plaintext"
                 );
             }
-            StoreValue::Plain(_) => panic!("record must be sealed"),
+            StoreValue::Plain(_) | StoreValue::Signed(_) => {
+                panic!("record must be sealed")
+            }
         }
     }
 

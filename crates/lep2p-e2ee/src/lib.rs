@@ -206,6 +206,57 @@ impl KeyBundle {
     }
 }
 
+/// Build a domain-separated, length-prefixed message for signing.
+///
+/// Length prefixes make the encoding unambiguous: different part splits of the
+/// same concatenation (`["ab","c"]` vs `["a","bc"]`) produce different bytes.
+fn framed_message(domain: &[u8], parts: &[&[u8]]) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(domain);
+    for part in parts {
+        msg.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        msg.extend_from_slice(part);
+    }
+    msg
+}
+
+/// Sign `domain || framed(parts)` with the node's ed25519 identity.
+pub fn sign_parts(identity: &Identity, domain: &[u8], parts: &[&[u8]]) -> [u8; 64] {
+    identity
+        .signing_key()
+        .sign(&framed_message(domain, parts))
+        .to_bytes()
+}
+
+/// Verify a signature produced by [`sign_parts`], binding the signing key to
+/// `expected` through `bundle`.
+pub fn verify_parts(
+    bundle: &KeyBundle,
+    expected: &NodeId,
+    domain: &[u8],
+    parts: &[&[u8]],
+    sig: &[u8],
+) -> bool {
+    if !bundle.verify(expected) {
+        return false;
+    }
+    let Ok(ed_bytes) = <[u8; 32]>::try_from(bundle.ed25519_pub.as_slice()) else {
+        return false;
+    };
+    let Ok(verifying) = VerifyingKey::from_bytes(&ed_bytes) else {
+        return false;
+    };
+    let Ok(sig_bytes) = <[u8; 64]>::try_from(sig) else {
+        return false;
+    };
+    verifying
+        .verify(
+            &framed_message(domain, parts),
+            &Signature::from_bytes(&sig_bytes),
+        )
+        .is_ok()
+}
+
 /// HKDF-SHA256 helper producing a 32-byte key.
 fn hkdf32(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
@@ -487,5 +538,52 @@ mod tests {
             second[..PUBLIC_KEY_LEN],
             "each box must embed a fresh ephemeral key"
         );
+    }
+
+    #[test]
+    fn signed_parts_roundtrip_and_binding() {
+        let (a, b, _) = identities();
+        let bundle = KeyBundle::create(&a);
+        let sig = sign_parts(&a, b"test-domain", &[b"key", b"value"]);
+
+        assert!(verify_parts(
+            &bundle,
+            &a.node_id(),
+            b"test-domain",
+            &[b"key", b"value"],
+            &sig
+        ));
+        // Tampered part.
+        assert!(!verify_parts(
+            &bundle,
+            &a.node_id(),
+            b"test-domain",
+            &[b"key", b"value!"],
+            &sig
+        ));
+        // Wrong domain.
+        assert!(!verify_parts(
+            &bundle,
+            &a.node_id(),
+            b"other",
+            &[b"key", b"value"],
+            &sig
+        ));
+        // Wrong expected signer.
+        assert!(!verify_parts(
+            &bundle,
+            &b.node_id(),
+            b"test-domain",
+            &[b"key", b"value"],
+            &sig
+        ));
+    }
+
+    #[test]
+    fn framed_message_is_unambiguous() {
+        let (a, _, _) = identities();
+        let bundle = KeyBundle::create(&a);
+        let sig = sign_parts(&a, b"t", &[b"ab", b"c"]);
+        assert!(!verify_parts(&bundle, &a.node_id(), b"t", &[b"a", b"bc"], &sig));
     }
 }

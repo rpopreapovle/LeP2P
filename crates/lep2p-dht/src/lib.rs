@@ -23,14 +23,74 @@ use std::sync::{Arc, RwLock};
 
 const K: usize = 20;
 
-/// A value held by a DHT node: plaintext, or a sealed blob that only the
-/// intended reader can open.
+/// Domain separation for signed DHT records.
+const SIGNED_RECORD_DOMAIN: &[u8] = b"lep2p-dht-record-v1";
+
+/// A value held by a DHT node: plaintext, sealed, or signed.
 #[derive(Clone, Debug)]
 pub enum StoreValue {
-    /// Readable by the storing node and anyone who fetches it.
+    /// Readable by the storing node and anyone who fetches it. Not authenticated.
     Plain(String),
     /// Opaque ciphertext addressed to a specific node.
     Sealed(SealedRecord),
+    /// Plaintext signed by its publisher; readers can detect tampering.
+    Signed(SignedRecord),
+}
+
+/// A plaintext record signed by its publisher.
+///
+/// The signature covers `(key, value)`, so a storage node cannot alter either
+/// without detection. The first authenticated record under a key owns it:
+/// later records under the same key must come from the same publisher.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SignedRecord {
+    /// The record value.
+    pub value: String,
+    /// Publisher's verified E2EE key bundle.
+    pub from_bundle: KeyBundle,
+    /// ed25519 signature over the framed `(key, value)` message.
+    pub sig: Vec<u8>,
+}
+
+impl SignedRecord {
+    /// Sign `value` under `key` with the publisher's identity.
+    pub fn create(identity: &Identity, key: &str, value: &str) -> Self {
+        let sig = lep2p_e2ee::sign_parts(
+            identity,
+            SIGNED_RECORD_DOMAIN,
+            &[key.as_bytes(), value.as_bytes()],
+        );
+        Self {
+            value: value.to_string(),
+            from_bundle: KeyBundle::create(identity),
+            sig: sig.to_vec(),
+        }
+    }
+
+    /// The publisher this record claims.
+    pub fn publisher(&self) -> Option<NodeId> {
+        self.from_bundle.node_id()
+    }
+
+    /// Verify the record against the storage key and an expected publisher.
+    pub fn verify(&self, key: &str, expected: &NodeId) -> bool {
+        lep2p_e2ee::verify_parts(
+            &self.from_bundle,
+            expected,
+            SIGNED_RECORD_DOMAIN,
+            &[key.as_bytes(), self.value.as_bytes()],
+            &self.sig,
+        )
+    }
+}
+
+/// The publisher that owns a stored value, if any authenticated record.
+fn owner_of(value: &StoreValue) -> Option<NodeId> {
+    match value {
+        StoreValue::Plain(_) => None,
+        StoreValue::Sealed(record) => record.from_bundle.node_id(),
+        StoreValue::Signed(record) => record.publisher(),
+    }
 }
 
 /// A sealed DHT record: `blob` is `lep2p_e2ee::seal` output for `to`.
@@ -168,13 +228,15 @@ impl Endpoint for PutEndpoint {
             value: Option<String>,
             #[serde(default)]
             sealed: Option<SealedRecord>,
+            #[serde(default)]
+            signed: Option<SignedRecord>,
         }
         let req: Req =
             serde_json::from_value(body).map_err(|e| ControlError::BadRequest(e.to_string()))?;
 
-        let value = match (req.value, req.sealed) {
-            (Some(value), None) => StoreValue::Plain(value),
-            (None, Some(sealed)) => {
+        let value = match (req.value, req.sealed, req.signed) {
+            (Some(value), None, None) => StoreValue::Plain(value),
+            (None, Some(sealed), None) => {
                 let sender = ctx.peer_node_id.ok_or_else(|| {
                     ControlError::BadRequest("publisher is not authenticated".into())
                 })?;
@@ -185,12 +247,50 @@ impl Endpoint for PutEndpoint {
                 }
                 StoreValue::Sealed(sealed)
             }
+            (None, None, Some(record)) => {
+                let sender = ctx.peer_node_id.ok_or_else(|| {
+                    ControlError::BadRequest("publisher is not authenticated".into())
+                })?;
+                if record.publisher() != Some(sender) {
+                    return Err(ControlError::BadRequest(
+                        "signed record publisher does not match the sender".into(),
+                    ));
+                }
+                if !record.verify(&req.key, &sender) {
+                    return Err(ControlError::BadRequest("invalid record signature".into()));
+                }
+                StoreValue::Signed(record)
+            }
             _ => {
                 return Err(ControlError::BadRequest(
-                    "provide exactly one of `value` or `sealed`".into(),
+                    "provide exactly one of `value`, `sealed`, or `signed`".into(),
                 ))
             }
         };
+
+        // The first authenticated record under a key owns it: reject
+        // overwrites from other publishers and unsigned overwrites of owned keys.
+        let existing = self
+            .store
+            .read()
+            .unwrap()
+            .get(&req.key)
+            .map(|(v, _)| v.clone());
+        if let Some(existing) = existing {
+            match (owner_of(&existing), owner_of(&value)) {
+                (Some(owner), Some(new_owner)) if owner != new_owner => {
+                    return Err(ControlError::BadRequest(
+                        "key is owned by another publisher".into(),
+                    ));
+                }
+                (Some(_), None) => {
+                    return Err(ControlError::BadRequest(
+                        "key is owned by a publisher; a signed or sealed record is required".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
 
         let exp = now_ts() + req.ttl as u64;
         self.store.write().unwrap().insert(req.key, (value, exp));
@@ -228,12 +328,15 @@ impl Endpoint for GetEndpoint {
             let s = self.store.read().unwrap();
             s.get(&req.key).cloned()
         };
-        let (value, sealed) = match entry {
-            Some((StoreValue::Plain(v), _)) => (Some(v), None),
-            Some((StoreValue::Sealed(s), _)) => (None, Some(s)),
-            None => (None, None),
+        let (value, sealed, signed) = match entry {
+            Some((StoreValue::Plain(v), _)) => (Some(v), None, None),
+            Some((StoreValue::Sealed(s), _)) => (None, Some(s), None),
+            Some((StoreValue::Signed(s), _)) => (None, None, Some(s)),
+            None => (None, None, None),
         };
-        Ok(json!({ "v": SCHEMA_VERSION, "value": value, "sealed": sealed, "nodes": [] }))
+        Ok(
+            json!({ "v": SCHEMA_VERSION, "value": value, "sealed": sealed, "signed": signed, "nodes": [] }),
+        )
     }
 }
 
@@ -370,6 +473,75 @@ impl DhtNode {
         )?))
     }
 
+    /// Store a signed plaintext record under `key` on `peer`.
+    pub async fn put_signed(
+        &self,
+        peer: &Peer,
+        key: &str,
+        value: &str,
+        ttl: u32,
+    ) -> anyhow::Result<()> {
+        let record = SignedRecord::create(&self.transport.identity(), key, value);
+        let resp = peer
+            .request(
+                "/v1/dht/put",
+                json!({ "v": SCHEMA_VERSION, "key": key, "ttl": ttl, "signed": record }),
+            )
+            .await?;
+        if resp.get("stored").and_then(|v| v.as_bool()) != Some(true) {
+            anyhow::bail!("dht put rejected: {resp}");
+        }
+        Ok(())
+    }
+
+    /// Fetch a record and verify its signature.
+    ///
+    /// When `expected_publisher` is set, the record must be signed by exactly
+    /// that node — plaintext records are rejected, so the queried storage node
+    /// cannot swap in unauthenticated data. Returns `Ok(None)` if the key is
+    /// absent.
+    pub async fn get_signed(
+        &self,
+        peer: &Peer,
+        key: &str,
+        expected_publisher: Option<NodeId>,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        let resp = peer
+            .request(
+                "/v1/dht/get",
+                json!({ "v": SCHEMA_VERSION, "key": key }),
+            )
+            .await?;
+
+        if let Some(signed_value) = resp.get("signed").filter(|v| !v.is_null()) {
+            let record: SignedRecord = serde_json::from_value(signed_value.clone())?;
+            let publisher = record
+                .publisher()
+                .ok_or_else(|| anyhow::anyhow!("invalid record publisher"))?;
+            if let Some(expected) = expected_publisher {
+                if publisher != expected {
+                    anyhow::bail!("record publisher mismatch");
+                }
+            }
+            if !record.verify(key, &publisher) {
+                anyhow::bail!("record signature verification failed");
+            }
+            return Ok(Some(record.value.into_bytes()));
+        }
+
+        if let Some(value) = resp.get("value").and_then(|v| v.as_str()) {
+            if expected_publisher.is_some() {
+                anyhow::bail!("record is not signed");
+            }
+            return Ok(Some(value.as_bytes().to_vec()));
+        }
+
+        if resp.get("sealed").map(|v| !v.is_null()).unwrap_or(false) {
+            anyhow::bail!("record is sealed, use get_sealed");
+        }
+        Ok(None)
+    }
+
     /// Bootstrap from TXT DNS seeds; returns connected peers.
     pub async fn bootstrap(&self, seed_hosts: &[String]) -> anyhow::Result<Vec<Peer>> {
         let mut contacts = Vec::new();
@@ -389,3 +561,37 @@ impl DhtNode {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity(seed: u8) -> Identity {
+        Identity::from_bytes(&[seed; 32])
+    }
+
+    #[test]
+    fn signed_record_roundtrip_and_tamper() {
+        let a = identity(1);
+        let b = identity(2);
+        let record = SignedRecord::create(&a, "profile", "v1");
+
+        assert!(record.verify("profile", &a.node_id()));
+        // Replayed under another key.
+        assert!(!record.verify("other", &a.node_id()));
+        // Claimed as another publisher.
+        assert!(!record.verify("profile", &b.node_id()));
+
+        let mut tampered = record.clone();
+        tampered.value = "v2".into();
+        assert!(!tampered.verify("profile", &a.node_id()));
+    }
+
+    #[test]
+    fn ownership_tracks_authenticated_publishers() {
+        let a = identity(1);
+        let stored = StoreValue::Signed(SignedRecord::create(&a, "k", "v"));
+        assert_eq!(owner_of(&stored), Some(a.node_id()));
+        assert_eq!(owner_of(&StoreValue::Plain("v".into())), None);
+    }
+}
