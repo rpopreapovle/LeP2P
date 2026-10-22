@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 use lep2p_core::{
-    parse_node_id, NatCapabilities, NatMethod, PunchIntent, PunchReq, PunchResp, ReflectReq,
-    ReflectResp,
+    parse_node_id, NatCapabilities, NatMethod, PunchAckReq, PunchIntent, PunchReq, PunchResp,
+    ReflectReq, ReflectResp,
 };
 use lep2p_e2ee::KeyBundle;
 use lep2p_identity::NodeId;
@@ -51,10 +51,9 @@ impl Endpoint for PunchEndpoint {
         let target = parse_node_id(&req.target)
             .ok_or_else(|| ControlError::BadRequest("bad target node_id".into()))?;
 
-        let target_peer = self
-            .peers
-            .get(&target)
-            .ok_or_else(|| ControlError::BadRequest("target not reachable via rendezvous".into()))?;
+        let target_peer = self.peers.get(&target).ok_or_else(|| {
+            ControlError::BadRequest("target not reachable via rendezvous".into())
+        })?;
 
         let initiator_intent = PunchIntent {
             node_id: ctx.identity.node_id().to_base32(),
@@ -76,6 +75,90 @@ impl Endpoint for PunchEndpoint {
     }
 }
 
+/// A punch intent recorded by the rendezvous for a target to pick up, so the
+/// target can fire its own Initial back (simultaneous open).
+#[derive(Debug, Clone)]
+pub struct PendingPunch {
+    pub initiator: NodeId,
+    pub initiator_observed: SocketAddr,
+}
+
+/// Shared registry of pending punches, keyed by the initiator's NodeId.
+pub type PendingPunchMap = Arc<Mutex<HashMap<NodeId, Vec<PendingPunch>>>>;
+
+/// `/v1/nat/punch_ack` handler: the initiator tells the rendezvous it is
+/// punching toward a target. The rendezvous records the intent so the target
+/// can learn about it via `/v1/nat/pending` and start its own simultaneous open.
+pub struct PunchAckEndpoint {
+    peers: Arc<PeerTable>,
+    pending: Arc<Mutex<HashMap<NodeId, Vec<PendingPunch>>>>,
+}
+
+impl PunchAckEndpoint {
+    pub fn new(
+        peers: Arc<PeerTable>,
+        pending: Arc<Mutex<HashMap<NodeId, Vec<PendingPunch>>>>,
+    ) -> Self {
+        Self { peers, pending }
+    }
+}
+
+#[async_trait]
+impl Endpoint for PunchAckEndpoint {
+    async fn call(&self, ctx: &CallCtx, body: serde_json::Value) -> EndpointResult {
+        let req: PunchAckReq = lep2p_transport::router::decode(body)?;
+        let initiator = parse_node_id(&req.initiator)
+            .ok_or_else(|| ControlError::BadRequest("bad initiator node_id".into()))?;
+        if self.peers.get(&initiator).is_none() {
+            return Err(ControlError::BadRequest(
+                "initiator not reachable via rendezvous".into(),
+            ));
+        }
+
+        // The caller must be the initiator it claims to be (fail closed).
+        if ctx.peer_node_id != Some(initiator) {
+            return Err(ControlError::BadRequest(
+                "punch_ack sender does not match the initiator".into(),
+            ));
+        }
+
+        self.pending.lock().unwrap().entry(initiator).or_default();
+        use lep2p_transport::router::ok;
+        ok(json!({ "v": lep2p_core::SCHEMA_VERSION, "ack": true }))
+    }
+}
+
+/// `/v1/nat/pending` handler: a target asks the rendezvous which initiators are
+/// currently punching toward it, so it can start its own simultaneous open.
+pub struct PendingPunchEndpoint {
+    pending: Arc<Mutex<HashMap<NodeId, Vec<PendingPunch>>>>,
+}
+
+impl PendingPunchEndpoint {
+    pub fn new(pending: Arc<Mutex<HashMap<NodeId, Vec<PendingPunch>>>>) -> Self {
+        Self { pending }
+    }
+}
+
+#[async_trait]
+impl Endpoint for PendingPunchEndpoint {
+    async fn call(&self, ctx: &CallCtx, _body: serde_json::Value) -> EndpointResult {
+        let me = ctx
+            .peer_node_id
+            .ok_or_else(|| ControlError::BadRequest("caller is not authenticated".into()))?;
+        let initiators = self
+            .pending
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| **id != me)
+            .map(|(id, _)| id.to_base32())
+            .collect::<Vec<_>>();
+        use lep2p_transport::router::ok;
+        ok(json!({ "v": lep2p_core::SCHEMA_VERSION, "initiators": initiators }))
+    }
+}
+
 /// Client-side helpers to drive NAT traversal against a rendezvous peer.
 pub struct NatClient {
     pub transport: Arc<lep2p_transport::NodeTransport>,
@@ -85,21 +168,23 @@ impl NatClient {
     /// Ask a rendezvous peer what external `ip:port` this node appears from.
     pub async fn reflect(&self, rendezvous: &Peer) -> anyhow::Result<SocketAddr> {
         let resp = rendezvous
-            .request("/v1/nat/reflect", json!(ReflectReq { v: lep2p_core::SCHEMA_VERSION }))
+            .request(
+                "/v1/nat/reflect",
+                json!(ReflectReq {
+                    v: lep2p_core::SCHEMA_VERSION
+                }),
+            )
             .await?;
         let resp: ReflectResp = serde_json::from_value(resp)?;
         Ok(resp.observed)
     }
 
-    /// Hole punch toward `target` through `rendezvous`, then connect directly.
-    ///
-    /// In M1 this returns the direct connection opened after learning the target's
-    /// public address from the rendezvous. (Symmetric-NAT both-side firing is M2.)
-    pub async fn hole_punch(
-        &self,
-        rendezvous: &Peer,
-        target: NodeId,
-    ) -> anyhow::Result<Peer> {
+    /// Hole punch toward `target` through `rendezvous` using a simultaneous open:
+    /// both sides fire QUIC Initials at each other's public addresses, and we
+    /// retry a few times so the NAT mapping towards the target is created. On
+    /// a symmetric NAT this still fails (the mapping is per-destination), which
+    /// is exactly what the relay fallback is for.
+    pub async fn hole_punch(&self, rendezvous: &Peer, target: NodeId) -> anyhow::Result<Peer> {
         let resp = rendezvous
             .request(
                 "/v1/nat/punch",
@@ -111,7 +196,41 @@ impl NatClient {
             .await?;
         let resp: PunchResp = serde_json::from_value(resp)?;
         tracing::debug!("punch target observed: {}", resp.target_observed);
-        self.transport.connect(resp.target_observed, target).await
+
+        // Tell the target we are punching so it fires its own Initial back
+        // (simultaneous open). This is best-effort: the rendezvous is the one
+        // authoritative place that knows both addresses.
+        let _ = rendezvous
+            .request(
+                "/v1/nat/punch_ack",
+                json!(PunchAckReq {
+                    v: lep2p_core::SCHEMA_VERSION,
+                    initiator: self.transport.node_id().to_base32(),
+                    initiator_observed: resp.initiator_intent.observed,
+                }),
+            )
+            .await;
+
+        // Simultaneous open: fire our own Initial at the target's public address
+        // and retry a few times (QUIC Initials are idempotent, so a couple of
+        // probes help the NAT mapping on the target's side to be created).
+        const ATTEMPTS: usize = 3;
+        let mut last_err = None;
+        for attempt in 0..ATTEMPTS {
+            match self.transport.connect(resp.target_observed, target).await {
+                Ok(peer) => {
+                    tracing::debug!("punch succeeded on attempt {}", attempt + 1);
+                    return Ok(peer);
+                }
+                Err(e) => {
+                    tracing::debug!("punch attempt {} failed: {e}", attempt + 1);
+                    last_err = Some(e);
+                    // Let the target's Initial arrive and its mapping settle.
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("hole punch failed")))
     }
 }
 
@@ -205,13 +324,16 @@ impl Endpoint for HelloEndpoint {
         let node_id = parse_node_id(&req.node_id)
             .ok_or_else(|| ControlError::BadRequest("bad node_id".into()))?;
 
-        // Bind the claimed id to the TLS-authenticated identity.
-        if let Some(authed) = ctx.peer_node_id {
-            if authed != node_id {
-                return Err(ControlError::BadRequest(
-                    "node_id does not match TLS identity".into(),
-                ));
-            }
+        // Bind the claimed id to the TLS-authenticated identity. Fail closed:
+        // without a verifiable TLS identity the caller cannot register, so the
+        // peer table cannot be poisoned by unauthenticated claims.
+        let authed = ctx.peer_node_id.ok_or_else(|| {
+            ControlError::BadRequest("caller has no verifiable TLS identity".into())
+        })?;
+        if authed != node_id {
+            return Err(ControlError::BadRequest(
+                "node_id does not match TLS identity".into(),
+            ));
         }
 
         if let Some(conn) = &ctx.conn {
@@ -468,9 +590,9 @@ impl Endpoint for RelayBlobEndpoint {
         let req: RelayBlobReq = lep2p_transport::router::decode(body)?;
         let to = parse_node_id(&req.to)
             .ok_or_else(|| ControlError::BadRequest("bad target node_id".into()))?;
-        let from = ctx.peer_node_id.ok_or_else(|| {
-            ControlError::BadRequest("sender is not authenticated".into())
-        })?;
+        let from = ctx
+            .peer_node_id
+            .ok_or_else(|| ControlError::BadRequest("sender is not authenticated".into()))?;
 
         if !req.from_bundle.verify(&from) {
             return Err(ControlError::BadRequest(
@@ -594,10 +716,7 @@ impl NatClient {
     /// Drain sealed blobs addressed to this node from a relay mailbox.
     pub async fn pull(&self, relay: &Peer) -> anyhow::Result<Vec<RelayedBlob>> {
         let resp = relay
-            .request(
-                "/v1/relay/pull",
-                json!({ "v": lep2p_core::SCHEMA_VERSION }),
-            )
+            .request("/v1/relay/pull", json!({ "v": lep2p_core::SCHEMA_VERSION }))
             .await?;
         let blobs = resp.get("blobs").cloned().unwrap_or(json!([]));
         Ok(serde_json::from_value(blobs)?)
