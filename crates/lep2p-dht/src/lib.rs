@@ -136,13 +136,19 @@ pub async fn try_seed_connect(
         return None;
     }
     if !verify_seed(contact) {
-        tracing::warn!("seed failed verification, dropping: {}", contact.overlay_ipv6);
+        tracing::warn!(
+            "seed failed verification, dropping: {}",
+            contact.overlay_ipv6
+        );
         return None;
     }
     match transport.connect(contact.socket, contact.node_id).await {
         Ok(peer) => {
             peers.insert(peer.clone());
-            table.write().unwrap().insert(contact.node_id, contact.socket);
+            table
+                .write()
+                .unwrap()
+                .insert(contact.node_id, contact.socket);
             Some(peer)
         }
         Err(e) => {
@@ -170,9 +176,16 @@ impl FindNodeEndpoint {
             .iter()
             .map(|p| (p.node_id, p.observed))
             .collect();
-        cands.extend(self.table.read().unwrap().all().iter().map(|(id, s)| (*id, *s)));
-        cands.dedup_by_key(|(id, _)| *id);
+        cands.extend(
+            self.table
+                .read()
+                .unwrap()
+                .all()
+                .iter()
+                .map(|(id, s)| (*id, *s)),
+        );
         cands.sort_by_key(|(id, _)| Distance::xor(&target, id));
+        cands.dedup_by_key(|(id, _)| *id);
         cands.truncate(k);
         cands
             .into_iter()
@@ -190,8 +203,8 @@ impl Endpoint for FindNodeEndpoint {
             v: u32,
             target_id: String,
         }
-        let req: Req = serde_json::from_value(body)
-            .map_err(|e| ControlError::BadRequest(e.to_string()))?;
+        let req: Req =
+            serde_json::from_value(body).map_err(|e| ControlError::BadRequest(e.to_string()))?;
         let target = lep2p_core::parse_node_id(&req.target_id)
             .ok_or_else(|| ControlError::BadRequest("bad target_id".into()))?;
         let near = self.closest(target, K);
@@ -326,7 +339,10 @@ impl Endpoint for GetEndpoint {
 
         let entry = {
             let s = self.store.read().unwrap();
-            s.get(&req.key).cloned()
+            match s.get(&req.key) {
+                Some((v, exp)) if *exp > now_ts() => Some((v.clone(), *exp)),
+                _ => None,
+            }
         };
         let (value, sealed, signed) = match entry {
             Some((StoreValue::Plain(v), _)) => (Some(v), None, None),
@@ -429,10 +445,7 @@ impl DhtNode {
     /// addressed to someone else or fails authentication.
     pub async fn get_sealed(&self, peer: &Peer, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         let resp = peer
-            .request(
-                "/v1/dht/get",
-                json!({ "v": SCHEMA_VERSION, "key": key }),
-            )
+            .request("/v1/dht/get", json!({ "v": SCHEMA_VERSION, "key": key }))
             .await?;
 
         if let Some(value) = resp.get("value").and_then(|v| v.as_str()) {
@@ -503,10 +516,7 @@ impl DhtNode {
         expected_publisher: Option<NodeId>,
     ) -> anyhow::Result<Option<Vec<u8>>> {
         let resp = peer
-            .request(
-                "/v1/dht/get",
-                json!({ "v": SCHEMA_VERSION, "key": key }),
-            )
+            .request("/v1/dht/get", json!({ "v": SCHEMA_VERSION, "key": key }))
             .await?;
 
         if let Some(signed_value) = resp.get("signed").filter(|v| !v.is_null()) {
@@ -555,8 +565,16 @@ impl DhtNode {
         )
         .await)
     }
-}
 
+    /// Drop expired records from the value store. Returns how many were removed.
+    pub fn sweep_expired(&self) -> usize {
+        let now = now_ts();
+        let mut store = self.store.write().unwrap();
+        let before = store.len();
+        store.retain(|_, (_, exp)| *exp > now);
+        before - store.len()
+    }
+}
 
 #[cfg(test)]
 mod tests {
