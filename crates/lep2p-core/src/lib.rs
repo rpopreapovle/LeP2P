@@ -160,6 +160,25 @@ pub struct PunchIntent {
     pub alpn_hint: String,
 }
 
+/// Signaling that a peer has started punching toward the target, so the target
+/// can fire its own Initial in return (simultaneous open). The rendezvous
+/// forwards this to the target after the initiator has registered its intent.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PunchAckReq {
+    pub v: u32,
+    /// NodeId (base32) of the peer that is punching toward us.
+    pub initiator: String,
+    /// The initiator's observed address, as seen by the rendezvous.
+    pub initiator_observed: SocketAddr,
+}
+
+/// Response to a punch-ack: the target confirms it has started punching back.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PunchAckResp {
+    pub v: u32,
+    pub ack: bool,
+}
+
 // DHT payloads (see lep2p-dht for routing logic).
 
 #[derive(Debug, Serialize, Deserialize)]

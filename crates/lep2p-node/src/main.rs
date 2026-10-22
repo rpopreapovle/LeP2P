@@ -10,16 +10,18 @@ use lep2p_core::{Capabilities, PingReq, PingResp, SCHEMA_VERSION};
 use lep2p_dht::{DhtNode, FindNodeEndpoint, GetEndpoint, PutEndpoint};
 use lep2p_identity::Identity;
 use lep2p_nat::{
-    HelloEndpoint, NodeKeysEndpoint, NoRelay, PunchEndpoint, ReflectEndpoint, RelayBlobEndpoint,
-    RelayEndpoint, RelayPullEndpoint, RelayQueues,
+    HelloEndpoint, NoRelay, NodeKeysEndpoint, PendingPunchEndpoint, PendingPunchMap,
+    PunchAckEndpoint, PunchEndpoint, ReflectEndpoint, RelayBlobEndpoint, RelayEndpoint,
+    RelayPullEndpoint, RelayQueues,
 };
 use lep2p_overlay::{LinuxRouteHooks, LinuxTun, OverlayNode};
 use lep2p_transport::{
     CallCtx, DataConn, DataHandler, Endpoint, EndpointResult, NodeTransport, PeerTable, Router,
 };
 use serde_json::json;
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// CLI entrypoint.
 #[derive(Parser, Debug)]
@@ -123,7 +125,11 @@ async fn run(identity: Identity, cfg: Config) -> anyhow::Result<()> {
             .await
             .context("bind transport")?,
     );
-    tracing::info!("node {} listening on {}", node_id.short(), transport.local_addr());
+    tracing::info!(
+        "node {} listening on {}",
+        node_id.short(),
+        transport.local_addr()
+    );
 
     // Shared state.
     let dht = Arc::new(DhtNode::new(transport.clone()));
@@ -147,14 +153,14 @@ async fn run(identity: Identity, cfg: Config) -> anyhow::Result<()> {
         RelayPullEndpoint::new(relay_queues.clone()),
     );
     router.register("/v1/nat/reflect", ReflectEndpoint);
+    router.register("/v1/nat/punch", PunchEndpoint::new(peers.clone()));
+    let pending: PendingPunchMap = Arc::new(Mutex::new(HashMap::new()));
     router.register(
-        "/v1/nat/punch",
-        PunchEndpoint::new(peers.clone()),
+        "/v1/nat/punch_ack",
+        PunchAckEndpoint::new(peers.clone(), pending.clone()),
     );
-    router.register(
-        "/v1/relay/offer",
-        RelayEndpoint::new(Arc::new(NoRelay)),
-    );
+    router.register("/v1/nat/pending", PendingPunchEndpoint::new(pending));
+    router.register("/v1/relay/offer", RelayEndpoint::new(Arc::new(NoRelay)));
     router.register(
         "/v1/dht/find_node",
         FindNodeEndpoint::new(peers.clone(), dht.table.clone()),
@@ -417,8 +423,9 @@ fn persist_identity(identity: &Identity, path: &str) -> anyhow::Result<()> {
 
 fn load_identity(path: &str) -> anyhow::Result<Identity> {
     let bytes = std::fs::read(path)?;
-    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-        anyhow::anyhow!("identity file must be exactly 32 bytes (ed25519 secret)")
-    })?;
+    let arr: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("identity file must be exactly 32 bytes (ed25519 secret)"))?;
     Ok(Identity::from_bytes(&arr))
 }
